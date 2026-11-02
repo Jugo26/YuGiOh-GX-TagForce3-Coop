@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.IO;
 using System.IO.Compression;
 using System.Net;
@@ -14,11 +16,112 @@ using System.Windows.Forms;
 
 namespace TagForce3Coop
 {
+    // ========================================================================
+    // JANELA DE JOGO AO VIVO DO PARCEIRO (ESPELHAMENTO EM TEMPO REAL + INPUT)
+    // ========================================================================
+    public class LiveCoopViewForm : Form
+    {
+        private PictureBox pbScreen;
+        private Label lblOverlay;
+        private LauncherForm parentLauncher;
+        private readonly object imgLock = new object();
+
+        public LiveCoopViewForm(LauncherForm parent)
+        {
+            this.parentLauncher = parent;
+            this.Text = "Yu-Gi-Oh! GX Tag Force 3 - Campanha Co-op Ao Vivo (Tela do Host em Tempo Real)";
+            this.ClientSize = new Size(960, 580);
+            this.StartPosition = FormStartPosition.CenterScreen;
+            this.BackColor = Color.FromArgb(10, 12, 16);
+            this.ForeColor = Color.White;
+            this.DoubleBuffered = true;
+            this.KeyPreview = true;
+
+            Panel pnlTop = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 36,
+                BackColor = Color.FromArgb(20, 24, 32)
+            };
+
+            lblOverlay = new Label
+            {
+                Text = "AO VIVO: Conectado na tela do Host! | Controles no Duelo: Setas, Z (Confirmar), X (Cancelar), A, S, Q, W, Espaco ou Controle USB",
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                ForeColor = Color.FromArgb(74, 222, 128),
+                Location = new Point(12, 8),
+                AutoSize = true
+            };
+
+            Button btnSyncDeck = new Button
+            {
+                Text = "Atualizar Meu Deck",
+                Size = new Size(135, 24),
+                Location = new Point(815, 6),
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                BackColor = Color.FromArgb(245, 158, 11),
+                ForeColor = Color.Black,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 8, FontStyle.Bold),
+                Cursor = Cursors.Hand,
+                TabStop = false
+            };
+            btnSyncDeck.FlatAppearance.BorderSize = 0;
+            btnSyncDeck.Click += (s, e) =>
+            {
+                parentLauncher.TriggerSendDeckFromLiveWindow();
+                this.Focus();
+            };
+
+            pnlTop.Controls.Add(lblOverlay);
+            pnlTop.Controls.Add(btnSyncDeck);
+
+            pbScreen = new PictureBox
+            {
+                Dock = DockStyle.Fill,
+                SizeMode = PictureBoxSizeMode.Zoom,
+                BackColor = Color.Black
+            };
+            pbScreen.Click += (s, e) => this.Focus();
+
+            this.Controls.Add(pbScreen);
+            this.Controls.Add(pnlTop);
+        }
+
+        public void UpdateFrame(byte[] jpegBytes)
+        {
+            if (this.IsDisposed || !this.IsHandleCreated) return;
+            try
+            {
+                Bitmap bmp;
+                using (MemoryStream ms = new MemoryStream(jpegBytes))
+                {
+                    bmp = new Bitmap(Image.FromStream(ms));
+                }
+                this.BeginInvoke(new Action(() =>
+                {
+                    if (this.IsDisposed)
+                    {
+                        bmp.Dispose();
+                        return;
+                    }
+                    lock (imgLock)
+                    {
+                        Image old = pbScreen.Image;
+                        pbScreen.Image = bmp;
+                        if (old != null) old.Dispose();
+                    }
+                }));
+            }
+            catch { }
+        }
+    }
+
+    // ========================================================================
+    // LAUNCHER PRINCIPAL CO-OP v1.3.0
+    // ========================================================================
     public class LauncherForm : Form
     {
-        // ====================================================================
-        // CONSTANTES DO JOGO E REDE
-        // ====================================================================
         private const int COOP_PORT = 27315;
         private const int WS_PORT = 45450;
         private const string DEFAULT_RADMIN_IP = "26.196.166.86";
@@ -34,10 +137,22 @@ namespace TagForce3Coop
 
         // Win32 Menu Commands nativos do PPSSPP (Menu ID 101)
         private const uint WM_COMMAND = 0x0111;
-        private const int ID_FILE_QUICKSAVESTATE = 40034; // Save State direto no PPSSPP
-        private const int ID_FILE_QUICKLOADSTATE = 40035; // Load State direto no PPSSPP
+        private const int ID_FILE_QUICKSAVESTATE = 40034;
+        private const int ID_FILE_QUICKLOADSTATE = 40035;
 
-        // Win32 API
+        // Win32 APIs
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT
+        {
+            public int Left, Top, Right, Bottom;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT
+        {
+            public int X, Y;
+        }
+
         [DllImport("user32.dll")]
         private static extern IntPtr GetForegroundWindow();
 
@@ -50,6 +165,15 @@ namespace TagForce3Coop
         [DllImport("user32.dll")]
         private static extern bool IsWindowVisible(IntPtr hWnd);
 
+        [DllImport("user32.dll")]
+        private static extern bool IsIconic(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+
+        [DllImport("user32.dll")]
+        private static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
+
         private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
         [DllImport("user32.dll")]
@@ -60,6 +184,41 @@ namespace TagForce3Coop
 
         [DllImport("user32.dll")]
         private static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+        [DllImport("user32.dll")]
+        private static extern uint MapVirtualKey(uint uCode, uint uMapType);
+
+        private const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
+        private const uint KEYEVENTF_KEYUP = 0x0002;
+
+        // XInput (Suporte a Controle Xbox/PS4/USB para o Amigo)
+        [StructLayout(LayoutKind.Sequential)]
+        private struct XINPUT_GAMEPAD
+        {
+            public ushort wButtons;
+            public byte bLeftTrigger;
+            public byte bRightTrigger;
+            public short sThumbLX;
+            public short sThumbLY;
+            public short sThumbRX;
+            public short sThumbRY;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct XINPUT_STATE
+        {
+            public uint dwPacketNumber;
+            public XINPUT_GAMEPAD Gamepad;
+        }
+
+        [DllImport("xinput1_4.dll", EntryPoint = "XInputGetState")]
+        private static extern uint XInputGetState14(uint dwUserIndex, ref XINPUT_STATE pState);
+
+        [DllImport("xinput9_1_0.dll", EntryPoint = "XInputGetState")]
+        private static extern uint XInputGetState910(uint dwUserIndex, ref XINPUT_STATE pState);
 
         private const int VK_F5 = 0x74;
         private const int VK_F6 = 0x75;
@@ -81,7 +240,6 @@ namespace TagForce3Coop
             { "select", 0x56 }    // V
         };
 
-        // Caminhos
         private string baseDir;
         private string gameCsoPath;
         private string bundledPpssppPath;
@@ -97,9 +255,11 @@ namespace TagForce3Coop
         private Button btnPartner;
         private Label lblNetStatus;
         private TextBox txtLog;
+        private LiveCoopViewForm liveViewForm;
 
         // Estado Co-op
         private volatile bool running = false;
+        private volatile bool sendingSavestate = false;
         private string role = ""; // "host" ou "partner"
         private string activeTurn = "host";
         private TcpListener serverListener;
@@ -108,7 +268,8 @@ namespace TagForce3Coop
         private readonly object sendLock = new object();
         private Socket wsSocket;
         private readonly object wsLock = new object();
-        private string localVersion = "1.2.0";
+        private string localVersion = "1.3.0";
+        private Dictionary<string, bool> hostLastPartnerBtns = new Dictionary<string, bool>();
 
         public LauncherForm()
         {
@@ -118,11 +279,22 @@ namespace TagForce3Coop
             bundledPpssppPath = Path.Combine(baseDir, "PPSSPP", "PPSSPPWindows64.exe");
             ppssppDocsDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "PPSSPP", "PSP");
 
+            CleanupOldExe();
             ReadLocalVersion();
             ConfigurePpssppForCoop(true, DEFAULT_RADMIN_IP);
             InitUI();
 
             ThreadPool.QueueUserWorkItem(_ => CheckGitHubUpdates(false));
+        }
+
+        private void CleanupOldExe()
+        {
+            try
+            {
+                string oldExe = Path.Combine(baseDir, "Launcher_Coop.exe.old");
+                if (File.Exists(oldExe)) File.Delete(oldExe);
+            }
+            catch { }
         }
 
         private void ReadLocalVersion()
@@ -143,7 +315,7 @@ namespace TagForce3Coop
         private void InitUI()
         {
             this.Text = "Yu-Gi-Oh! GX Tag Force 3 - Launcher Co-op v" + localVersion;
-            this.ClientSize = new Size(640, 670);
+            this.ClientSize = new Size(640, 680);
             this.FormBorderStyle = FormBorderStyle.FixedSingle;
             this.MaximizeBox = false;
             this.StartPosition = FormStartPosition.CenterScreen;
@@ -170,7 +342,7 @@ namespace TagForce3Coop
             };
             lblVersion = new Label
             {
-                Text = "Campanha Co-op via Radmin VPN (Sincronizacao Direta WM_COMMAND) | v" + localVersion,
+                Text = "Campanha Co-op Ao Vivo (Transmissao de Tela em Tempo Real + Controle Remoto) | v" + localVersion,
                 Font = new Font("Segoe UI", 9, FontStyle.Regular),
                 ForeColor = Color.FromArgb(56, 189, 248),
                 AutoSize = false,
@@ -188,7 +360,7 @@ namespace TagForce3Coop
                 Font = new Font("Segoe UI", 9, FontStyle.Bold),
                 ForeColor = Color.FromArgb(56, 189, 248),
                 BackColor = Color.FromArgb(24, 27, 34),
-                Location = new Point(20, 80),
+                Location = new Point(20, 78),
                 Size = new Size(600, 95)
             };
 
@@ -261,34 +433,40 @@ namespace TagForce3Coop
             // 2. Painel Modos Host / Parceiro
             GroupBox grpModes = new GroupBox
             {
-                Text = " 2. Iniciar Jogo (PPSSPP Incluso na Pasta - 1 Clique!) ",
+                Text = " 2. Iniciar Campanha Co-op (Tela Ao Vivo + Deck do Amigo) ",
                 Font = new Font("Segoe UI", 9, FontStyle.Bold),
                 ForeColor = Color.FromArgb(245, 158, 11),
                 BackColor = Color.FromArgb(24, 27, 34),
-                Location = new Point(20, 185),
-                Size = new Size(600, 125)
+                Location = new Point(20, 180),
+                Size = new Size(600, 155)
             };
 
-            btnHost = CreateButton("CRIAR SALA CO-OP E ABRIR JOGO (SOU O HOST)", new Point(16, 26), new Size(568, 42), Color.FromArgb(185, 28, 28), Color.White);
-            btnHost.Font = new Font("Segoe UI", 11, FontStyle.Bold);
+            btnHost = CreateButton("CRIAR SALA CO-OP E ABRIR JOGO (SOU O HOST)", new Point(16, 24), new Size(568, 40), Color.FromArgb(185, 28, 28), Color.White);
+            btnHost.Font = new Font("Segoe UI", 10.5f, FontStyle.Bold);
             btnHost.Click += (s, e) => StartAsHost();
 
-            btnPartner = CreateButton("ENTRAR NA CAMPANHA DO HOST (SOU O AMIGO / PARCEIRO)", new Point(16, 74), new Size(568, 42), Color.FromArgb(2, 132, 199), Color.White);
-            btnPartner.Font = new Font("Segoe UI", 11, FontStyle.Bold);
+            btnPartner = CreateButton("ENTRAR NA CAMPANHA DO HOST AO VIVO (SOU O AMIGO / PARCEIRO)", new Point(16, 70), new Size(568, 40), Color.FromArgb(2, 132, 199), Color.White);
+            btnPartner.Font = new Font("Segoe UI", 10.5f, FontStyle.Bold);
             btnPartner.Click += (s, e) => StartAsPartner();
 
-            grpModes.Controls.AddRange(new Control[] { btnHost, btnPartner });
+            Button btnOpenLiveView = CreateButton("Abrir Tela Ao Vivo do Host", new Point(16, 116), new Size(278, 30), Color.FromArgb(20, 83, 45), Color.FromArgb(74, 222, 128));
+            btnOpenLiveView.Click += (s, e) => ShowLiveViewWindow();
+
+            Button btnOpenLocalPpsspp = CreateButton("Abrir Meu PPSSPP (Editar Meu Deck / Save)", new Point(306, 116), new Size(278, 30), Color.FromArgb(38, 43, 54), Color.FromArgb(245, 158, 11));
+            btnOpenLocalPpsspp.Click += (s, e) => LaunchPpsspp();
+
+            grpModes.Controls.AddRange(new Control[] { btnHost, btnPartner, btnOpenLiveView, btnOpenLocalPpsspp });
             this.Controls.Add(grpModes);
 
             // 3. Painel Sincronizacao
             GroupBox grpSync = new GroupBox
             {
-                Text = " 3. Sincronizacao de Campanha, Turnos e Deck (Atalhos no Jogo: F5, F6, F7) ",
+                Text = " 3. Sincronizacao de Deck e Estado (Atalhos Opcionais: F5, F6, F7) ",
                 Font = new Font("Segoe UI", 9, FontStyle.Bold),
                 ForeColor = Color.FromArgb(34, 197, 94),
                 BackColor = Color.FromArgb(24, 27, 34),
-                Location = new Point(20, 320),
-                Size = new Size(600, 130)
+                Location = new Point(20, 342),
+                Size = new Size(600, 125)
             };
 
             lblNetStatus = new Label
@@ -296,38 +474,48 @@ namespace TagForce3Coop
                 Text = "Status: Pronto para iniciar (Escolha Host ou Parceiro acima)",
                 Font = new Font("Segoe UI", 9, FontStyle.Bold),
                 ForeColor = Color.FromArgb(234, 179, 8),
-                Location = new Point(16, 24),
+                Location = new Point(16, 22),
                 Size = new Size(568, 20)
             };
 
-            Button btnF5 = CreateButton("[F5] Sincronizar Tela/Estado", new Point(16, 50), new Size(184, 32), Color.FromArgb(38, 43, 54), Color.White);
+            Button btnF5 = CreateButton("[F5] Sincronizar PPSSPP", new Point(16, 48), new Size(184, 30), Color.FromArgb(38, 43, 54), Color.White);
             btnF5.Click += (s, e) => ThreadPool.QueueUserWorkItem(_ =>
             {
                 if (role == "partner") SendFrame(4, Encoding.UTF8.GetBytes("host"));
                 else CaptureAndSendSavestate("host");
             });
 
-            Button btnF6 = CreateButton("[F6] Passar Vez p/ Amigo", new Point(208, 50), new Size(184, 32), Color.FromArgb(30, 58, 138), Color.FromArgb(56, 189, 248));
+            Button btnF6 = CreateButton("[F6] Vez do Amigo", new Point(208, 48), new Size(184, 30), Color.FromArgb(30, 58, 138), Color.FromArgb(56, 189, 248));
             btnF6.Click += (s, e) => ThreadPool.QueueUserWorkItem(_ =>
             {
-                if (role == "partner") SendFrame(4, Encoding.UTF8.GetBytes("partner"));
-                else CaptureAndSendSavestate("partner");
+                activeTurn = "partner";
+                SetStatus("Vez Ativa: PARCEIRO (Amigo controlando o jogo)");
+                AppendLog("[Turno] Controle liberado para o Amigo!");
+                if (role == "host" && FindPpssppWindow() != IntPtr.Zero)
+                {
+                    SendWebSocketJson("{\"event\":\"memory.write_u32\",\"address\":" + PSP_PARTNER_AI_FLAG + ",\"value\":0}");
+                }
             });
 
-            Button btnF7 = CreateButton("[F7] Fim do Turno do Amigo", new Point(400, 50), new Size(184, 32), Color.FromArgb(20, 83, 45), Color.FromArgb(74, 222, 128));
-            btnF7.Click += (s, e) => ThreadPool.QueueUserWorkItem(_ => CaptureAndSendSavestate("host"));
+            Button btnF7 = CreateButton("[F7] Vez do Host", new Point(400, 48), new Size(184, 30), Color.FromArgb(20, 83, 45), Color.FromArgb(74, 222, 128));
+            btnF7.Click += (s, e) => ThreadPool.QueueUserWorkItem(_ =>
+            {
+                activeTurn = "host";
+                SetStatus("Vez Ativa: HOST");
+                AppendLog("[Turno] Controle principal com o Host.");
+            });
 
-            Button btnSendDeck = CreateButton("Enviar / Atualizar Meu Deck Proprio no Parceiro da Campanha", new Point(16, 88), new Size(410, 30), Color.FromArgb(38, 43, 54), Color.FromArgb(245, 158, 11));
+            Button btnSendDeck = CreateButton("Enviar / Atualizar Meu Deck Proprio no Parceiro da Campanha", new Point(16, 84), new Size(410, 30), Color.FromArgb(38, 43, 54), Color.FromArgb(245, 158, 11));
             btnSendDeck.Click += (s, e) => ThreadPool.QueueUserWorkItem(_ => SendOrApplyMyDeck());
 
-            Button btnCheats = CreateButton("Cheats", new Point(434, 88), new Size(72, 30), Color.FromArgb(38, 43, 54), Color.LightGray);
+            Button btnCheats = CreateButton("Cheats", new Point(434, 84), new Size(72, 30), Color.FromArgb(38, 43, 54), Color.LightGray);
             btnCheats.Click += (s, e) =>
             {
                 string ch = Path.Combine(ppssppDocsDir, "Cheats", "ULES01183.ini");
                 if (File.Exists(ch)) Process.Start("notepad.exe", ch);
             };
 
-            Button btnGuide = CreateButton("Guia", new Point(512, 88), new Size(72, 30), Color.FromArgb(38, 43, 54), Color.LightGray);
+            Button btnGuide = CreateButton("Guia", new Point(512, 84), new Size(72, 30), Color.FromArgb(38, 43, 54), Color.LightGray);
             btnGuide.Click += (s, e) =>
             {
                 string gd = Path.Combine(baseDir, "COMO_JOGAR_COOP.txt");
@@ -340,12 +528,12 @@ namespace TagForce3Coop
             // 4. Log
             GroupBox grpLog = new GroupBox
             {
-                Text = " Registro de Conexao, Sincronizacao e Auto-Updater Git ",
+                Text = " Registro de Conexao, Tela Ao Vivo e Auto-Updater Git ",
                 Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
                 ForeColor = Color.FromArgb(148, 163, 184),
                 BackColor = Color.FromArgb(24, 27, 34),
-                Location = new Point(20, 460),
-                Size = new Size(600, 195)
+                Location = new Point(20, 474),
+                Size = new Size(600, 190)
             };
 
             txtLog = new TextBox
@@ -357,14 +545,14 @@ namespace TagForce3Coop
                 ForeColor = Color.FromArgb(167, 243, 208),
                 BorderStyle = BorderStyle.None,
                 Font = new Font("Consolas", 8.5f),
-                Location = new Point(12, 22),
-                Size = new Size(576, 160)
+                Location = new Point(12, 20),
+                Size = new Size(576, 158)
             };
             grpLog.Controls.Add(txtLog);
             this.Controls.Add(grpLog);
 
-            AppendLog("[Sistema] Launcher Co-op v" + localVersion + " iniciado!");
-            AppendLog("[Dica] Assim que o amigo conectar, sua tela sera sincronizada com o PPSSPP dele!");
+            AppendLog("[Sistema] Launcher Co-op v" + localVersion + " pronto! (Transmissao Ao Vivo Ativa)");
+            AppendLog("[Dica] Tudo o que aparece na tela do Host agora vai em tempo real para o Amigo!");
         }
 
         private Button CreateButton(string text, Point loc, Size sz, Color bg, Color fg)
@@ -406,8 +594,33 @@ namespace TagForce3Coop
             lblNetStatus.Text = "Status: " + msg;
         }
 
+        public void ShowLiveViewWindow()
+        {
+            if (this.InvokeRequired)
+            {
+                this.BeginInvoke(new Action(ShowLiveViewWindow));
+                return;
+            }
+            if (liveViewForm == null || liveViewForm.IsDisposed)
+            {
+                liveViewForm = new LiveCoopViewForm(this);
+                liveViewForm.Icon = this.Icon;
+                liveViewForm.Show();
+            }
+            else
+            {
+                if (!liveViewForm.Visible) liveViewForm.Show();
+                liveViewForm.BringToFront();
+            }
+        }
+
+        public void TriggerSendDeckFromLiveWindow()
+        {
+            ThreadPool.QueueUserWorkItem(_ => SendOrApplyMyDeck());
+        }
+
         // ====================================================================
-        // CONFIGURACAO AUTOMATICA DO PPSSPP E LEITURA/INJECAO DE SAVE (DATA0)
+        // CONFIGURACAO AUTOMATICA DO PPSSPP E SAVE (DATA0)
         // ====================================================================
         private void CopyDirRecursive(string src, string dst)
         {
@@ -551,7 +764,7 @@ namespace TagForce3Coop
         }
 
         // ====================================================================
-        // EXECUCAO E CONTROLE DA JANELA DO PPSSPP (WM_COMMAND 40034 / 40035)
+        // CONTROLE E CAPTURA DE TELA DO PPSSPP
         // ====================================================================
         private IntPtr FindPpssppWindow()
         {
@@ -570,7 +783,7 @@ namespace TagForce3Coop
                     StringBuilder sbTitle = new StringBuilder(256);
                     GetWindowText(hWnd, sbTitle, 256);
                     string title = sbTitle.ToString();
-                    if ((title.Contains("PPSSPP") || title.Contains("ULES01183")) && !title.Contains("Launcher"))
+                    if ((title.Contains("PPSSPP") || title.Contains("ULES01183")) && !title.Contains("Launcher") && !title.Contains("Ao Vivo"))
                     {
                         found = hWnd;
                         return false;
@@ -581,18 +794,20 @@ namespace TagForce3Coop
             return found;
         }
 
-        private bool IsPpssppFocused()
+        private bool IsLocalGameWindowFocused()
         {
-            IntPtr hwnd = FindPpssppWindow();
-            if (hwnd == IntPtr.Zero) return false;
-            return GetForegroundWindow() == hwnd;
+            IntPtr fg = GetForegroundWindow();
+            if (fg == IntPtr.Zero) return false;
+            if (liveViewForm != null && !liveViewForm.IsDisposed && fg == liveViewForm.Handle)
+                return true;
+            IntPtr ppsspp = FindPpssppWindow();
+            return ppsspp != IntPtr.Zero && fg == ppsspp;
         }
 
         private bool TriggerPpssppSaveState()
         {
             IntPtr hwnd = FindPpssppWindow();
             if (hwnd == IntPtr.Zero) return false;
-            // Envia o comando de menu nativo ID_FILE_QUICKSAVESTATE (40034) direto para o PPSSPPWnd
             PostMessage(hwnd, WM_COMMAND, (IntPtr)ID_FILE_QUICKSAVESTATE, IntPtr.Zero);
             return true;
         }
@@ -601,14 +816,12 @@ namespace TagForce3Coop
         {
             IntPtr hwnd = FindPpssppWindow();
             if (hwnd == IntPtr.Zero) return false;
-            // Envia o comando de menu nativo ID_FILE_QUICKLOADSTATE (40035) direto para o PPSSPPWnd
             PostMessage(hwnd, WM_COMMAND, (IntPtr)ID_FILE_QUICKLOADSTATE, IntPtr.Zero);
             return true;
         }
 
         private string GetPrimaryStatePath()
         {
-            // DISC_ID = ULES01183, DISC_VERSION = 1.02 no PARAM.SFO do jogo PT-BR
             return Path.Combine(ppssppDocsDir, "PPSSPP_STATE", "ULES01183_1.02_0.ppst");
         }
 
@@ -654,6 +867,80 @@ namespace TagForce3Coop
                     WorkingDirectory = Path.GetDirectoryName(exe)
                 };
                 Process.Start(psi);
+            }
+        }
+
+        // Captura e transmite a tela do PPSSPP do Host em tempo real (~18 FPS JPEG)
+        private ImageCodecInfo GetJpegEncoder()
+        {
+            foreach (ImageCodecInfo codec in ImageCodecInfo.GetImageEncoders())
+            {
+                if (codec.MimeType == "image/jpeg") return codec;
+            }
+            return null;
+        }
+
+        private void HostScreenStreamThread()
+        {
+            ImageCodecInfo jpegCodec = GetJpegEncoder();
+            EncoderParameters encParams = new EncoderParameters(1);
+            encParams.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 58L);
+
+            const int targetW = 640;
+            const int targetH = 362;
+
+            using (Bitmap scaledBmp = new Bitmap(targetW, targetH, PixelFormat.Format24bppRgb))
+            using (Graphics gScaled = Graphics.FromImage(scaledBmp))
+            {
+                gScaled.InterpolationMode = InterpolationMode.Bilinear;
+                gScaled.CompositingQuality = CompositingQuality.HighSpeed;
+                gScaled.SmoothingMode = SmoothingMode.None;
+
+                while (running && role == "host")
+                {
+                    try
+                    {
+                        if (peerStream != null && !sendingSavestate)
+                        {
+                            IntPtr hwnd = FindPpssppWindow();
+                            if (hwnd != IntPtr.Zero && !IsIconic(hwnd))
+                            {
+                                RECT rc;
+                                if (GetClientRect(hwnd, out rc))
+                                {
+                                    int w = rc.Right - rc.Left;
+                                    int h = rc.Bottom - rc.Top;
+                                    if (w > 64 && h > 64)
+                                    {
+                                        POINT pt = new POINT { X = 0, Y = 0 };
+                                        ClientToScreen(hwnd, ref pt);
+
+                                        using (Bitmap srcBmp = new Bitmap(w, h, PixelFormat.Format24bppRgb))
+                                        {
+                                            using (Graphics gSrc = Graphics.FromImage(srcBmp))
+                                            {
+                                                gSrc.CopyFromScreen(pt.X, pt.Y, 0, 0, new Size(w, h), CopyPixelOperation.SourceCopy);
+                                            }
+                                            gScaled.DrawImage(srcBmp, new Rectangle(0, 0, targetW, targetH), new Rectangle(0, 0, w, h), GraphicsUnit.Pixel);
+                                        }
+
+                                        using (MemoryStream ms = new MemoryStream())
+                                        {
+                                            if (jpegCodec != null)
+                                                scaledBmp.Save(ms, jpegCodec, encParams);
+                                            else
+                                                scaledBmp.Save(ms, ImageFormat.Jpeg);
+
+                                            SendFrame(5, ms.ToArray());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch { }
+                    Thread.Sleep(55); // ~18 FPS fluido e leve na Radmin VPN
+                }
             }
         }
 
@@ -729,6 +1016,31 @@ namespace TagForce3Coop
             }
         }
 
+        // Executa os comandos de controle enviados pelo Amigo no PPSSPP do Host
+        private void ApplyRemoteButtonsOnHost(string wsJson)
+        {
+            SendWebSocketJson(wsJson);
+            SendWebSocketJson("{\"event\":\"memory.write_u32\",\"address\":" + PSP_PARTNER_AI_FLAG + ",\"value\":0}");
+
+            if (FindPpssppWindow() == IntPtr.Zero) return;
+
+            foreach (var kv in VK_MAP)
+            {
+                bool isDown = wsJson.Contains("\"" + kv.Key + "\":true");
+                bool wasDown = false;
+                hostLastPartnerBtns.TryGetValue(kv.Key, out wasDown);
+                if (isDown != wasDown)
+                {
+                    hostLastPartnerBtns[kv.Key] = isDown;
+                    byte vk = (byte)kv.Value;
+                    byte scan = (byte)MapVirtualKey(vk, 0);
+                    uint flags = isDown ? 0u : KEYEVENTF_KEYUP;
+                    if (vk >= 0x25 && vk <= 0x28) flags |= KEYEVENTF_EXTENDEDKEY;
+                    keybd_event(vk, scan, flags, UIntPtr.Zero);
+                }
+            }
+        }
+
         // ====================================================================
         // REDE CO-OP VIA RADMIN VPN (HOST E PARCEIRO)
         // ====================================================================
@@ -742,10 +1054,11 @@ namespace TagForce3Coop
                 role = "host";
                 activeTurn = "host";
                 new Thread(HostListenThread) { IsBackground = true }.Start();
+                new Thread(HostScreenStreamThread) { IsBackground = true }.Start();
                 new Thread(InputAndHotkeyThread) { IsBackground = true }.Start();
             }
             LaunchPpsspp();
-            btnHost.Text = "SALA HOST ATIVA (PPSSPP ABERTO)";
+            btnHost.Text = "SALA HOST ATIVA (TRANSMITINDO TELA AO VIVO)";
             btnHost.BackColor = Color.FromArgb(21, 128, 61);
             btnPartner.Enabled = false;
         }
@@ -758,12 +1071,12 @@ namespace TagForce3Coop
             {
                 running = true;
                 role = "partner";
-                activeTurn = "host";
+                activeTurn = "partner";
                 new Thread(() => PartnerConnectThread(ip)) { IsBackground = true }.Start();
                 new Thread(InputAndHotkeyThread) { IsBackground = true }.Start();
             }
-            LaunchPpsspp();
-            btnPartner.Text = "CONECTADO COMO PARCEIRO";
+            ShowLiveViewWindow();
+            btnPartner.Text = "CONECTADO A CAMPANHA DO HOST (TELA AO VIVO ABERTA)";
             btnPartner.BackColor = Color.FromArgb(3, 105, 161);
             btnHost.Enabled = false;
         }
@@ -826,14 +1139,8 @@ namespace TagForce3Coop
                     peerStream = client.GetStream();
                     string remoteIp = ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString();
                     AppendLog("[Conectado] Seu amigo conectou pelo Radmin VPN (" + remoteIp + ")!");
-                    SetStatus("Amigo Conectado (" + remoteIp + ") | Sincronizando...");
-
-                    // Sincroniza automaticamente a tela do Host com o Amigo 1.5s apos conectar!
-                    ThreadPool.QueueUserWorkItem(_ =>
-                    {
-                        Thread.Sleep(1500);
-                        CaptureAndSendSavestate("host");
-                    });
+                    AppendLog("[Ao Vivo] Transmitindo sua tela do jogo em tempo real para o seu amigo!");
+                    SetStatus("Amigo Conectado (" + remoteIp + ") | Transmitindo Tela Ao Vivo!");
 
                     ReceiveLoop(peerStream);
                 }
@@ -857,7 +1164,8 @@ namespace TagForce3Coop
                     peerClient = client;
                     peerStream = client.GetStream();
                     AppendLog("[Conectado] Conectado a Campanha do Host (" + hostIp + ") via Radmin VPN!");
-                    SetStatus("Conectado ao Host (" + hostIp + ")!");
+                    AppendLog("[Ao Vivo] Recebendo a tela da partida do Host em tempo real!");
+                    SetStatus("Conectado ao Host (" + hostIp + ") | Tela Ao Vivo Ativa!");
 
                     SendOrApplyMyDeck();
                     ReceiveLoop(peerStream);
@@ -909,40 +1217,41 @@ namespace TagForce3Coop
                 return;
             }
 
-            DateTime beforeSave = DateTime.UtcNow.AddMilliseconds(-100);
-            if (!TriggerPpssppSaveState())
-            {
-                AppendLog("[Aviso] Janela do PPSSPP nao encontrada. Abra o jogo primeiro.");
-                return;
-            }
-
-            string foundState = null;
-            DateTime deadline = DateTime.UtcNow.AddMilliseconds(2500);
-            while (DateTime.UtcNow < deadline)
-            {
-                foundState = FindNewestStateFile(beforeSave);
-                if (foundState != null)
-                {
-                    Thread.Sleep(120); // Aguarda PPSSPP finalizar a gravacao no disco
-                    break;
-                }
-                Thread.Sleep(40);
-            }
-
-            if (foundState == null)
-            {
-                string primary = GetPrimaryStatePath();
-                if (File.Exists(primary)) foundState = primary;
-            }
-
-            if (foundState == null || !File.Exists(foundState))
-            {
-                AppendLog("[Aviso] Certifique-se de que o jogo ja iniciou dentro do PPSSPP antes de sincronizar.");
-                return;
-            }
-
+            sendingSavestate = true;
             try
             {
+                DateTime beforeSave = DateTime.UtcNow.AddMilliseconds(-100);
+                if (!TriggerPpssppSaveState())
+                {
+                    AppendLog("[Aviso] Janela do PPSSPP nao encontrada. Abra o jogo primeiro.");
+                    return;
+                }
+
+                string foundState = null;
+                DateTime deadline = DateTime.UtcNow.AddMilliseconds(2500);
+                while (DateTime.UtcNow < deadline)
+                {
+                    foundState = FindNewestStateFile(beforeSave);
+                    if (foundState != null)
+                    {
+                        Thread.Sleep(120);
+                        break;
+                    }
+                    Thread.Sleep(40);
+                }
+
+                if (foundState == null)
+                {
+                    string primary = GetPrimaryStatePath();
+                    if (File.Exists(primary)) foundState = primary;
+                }
+
+                if (foundState == null || !File.Exists(foundState))
+                {
+                    AppendLog("[Aviso] Certifique-se de que o jogo ja iniciou dentro do PPSSPP antes de sincronizar.");
+                    return;
+                }
+
                 byte[] rawState = File.ReadAllBytes(foundState);
                 activeTurn = newTurn;
                 using (MemoryStream ms = new MemoryStream())
@@ -956,12 +1265,16 @@ namespace TagForce3Coop
                     SendFrame(2, payload);
                 }
                 string tLabel = activeTurn == "partner" ? "SEU AMIGO (Parceiro)" : "HOST";
-                AppendLog(string.Format("[Sync OK] Campanha sincronizada ({0} KB)! Vez ativa: {1}", rawState.Length / 1024, tLabel));
+                AppendLog(string.Format("[Sync OK] Estado sincronizado ({0} KB)! Vez ativa: {1}", rawState.Length / 1024, tLabel));
                 SetStatus("Sincronizado | Vez Ativa: " + tLabel);
             }
             catch (Exception ex)
             {
                 AppendLog("[Erro Sync] " + ex.Message);
+            }
+            finally
+            {
+                sendingSavestate = false;
             }
         }
 
@@ -989,11 +1302,14 @@ namespace TagForce3Coop
                 File.WriteAllBytes(path102, decompressed);
                 File.WriteAllBytes(path100, decompressed);
 
-                Thread.Sleep(50);
-                TriggerPpssppLoadState();
+                if (FindPpssppWindow() != IntPtr.Zero)
+                {
+                    Thread.Sleep(50);
+                    TriggerPpssppLoadState();
+                }
 
                 string tLabel = activeTurn == "partner" ? "PARCEIRO (Sua Vez!)" : "HOST";
-                AppendLog("[Sync OK] Campanha do Host carregada no seu PPSSPP! Vez ativa: " + tLabel);
+                AppendLog("[Sync OK] Estado da Campanha salvo/carregado no PPSSPP! Vez ativa: " + tLabel);
                 SetStatus("Sincronizado | Vez Ativa: " + tLabel);
             }
             catch (Exception ex)
@@ -1035,12 +1351,22 @@ namespace TagForce3Coop
                     else if (type == 3)
                     {
                         string wsJson = Encoding.UTF8.GetString(payload);
-                        SendWebSocketJson(wsJson);
+                        if (role == "host")
+                            ApplyRemoteButtonsOnHost(wsJson);
+                        else
+                            SendWebSocketJson(wsJson);
                     }
                     else if (type == 4 && role == "host")
                     {
                         string reqTurn = Encoding.UTF8.GetString(payload);
                         CaptureAndSendSavestate(reqTurn);
+                    }
+                    else if (type == 5 && role == "partner")
+                    {
+                        if (liveViewForm != null && !liveViewForm.IsDisposed)
+                        {
+                            liveViewForm.UpdateFrame(payload);
+                        }
                     }
                 }
             }
@@ -1053,6 +1379,46 @@ namespace TagForce3Coop
                 peerStream = null;
                 if (running) SetStatus("Amigo desconectado. Aguardando reconexao...");
             }
+        }
+
+        private Dictionary<string, bool> ReadLocalButtons()
+        {
+            Dictionary<string, bool> btns = new Dictionary<string, bool>();
+            foreach (var kv in VK_MAP)
+            {
+                btns[kv.Key] = (GetAsyncKeyState(kv.Value) & 0x8000) != 0;
+            }
+
+            // Leitura opcional de Controle XInput (Xbox/PS4/USB)
+            try
+            {
+                XINPUT_STATE st = new XINPUT_STATE();
+                uint res = 1;
+                try { res = XInputGetState14(0, ref st); }
+                catch { try { res = XInputGetState910(0, ref st); } catch { } }
+
+                if (res == 0)
+                {
+                    ushort w = st.Gamepad.wButtons;
+                    short lx = st.Gamepad.sThumbLX;
+                    short ly = st.Gamepad.sThumbLY;
+                    if ((w & 0x0001) != 0 || ly > 16000) btns["up"] = true;
+                    if ((w & 0x0002) != 0 || ly < -16000) btns["down"] = true;
+                    if ((w & 0x0004) != 0 || lx < -16000) btns["left"] = true;
+                    if ((w & 0x0008) != 0 || lx > 16000) btns["right"] = true;
+                    if ((w & 0x0010) != 0) btns["start"] = true;
+                    if ((w & 0x0020) != 0) btns["select"] = true;
+                    if ((w & 0x0100) != 0) btns["ltrigger"] = true;
+                    if ((w & 0x0200) != 0) btns["rtrigger"] = true;
+                    if ((w & 0x1000) != 0) btns["cross"] = true;
+                    if ((w & 0x2000) != 0) btns["circle"] = true;
+                    if ((w & 0x4000) != 0) btns["square"] = true;
+                    if ((w & 0x8000) != 0) btns["triangle"] = true;
+                }
+            }
+            catch { }
+
+            return btns;
         }
 
         private void InputAndHotkeyThread()
@@ -1075,24 +1441,26 @@ namespace TagForce3Coop
                     }
                     if (f6 && !f6Prev)
                     {
-                        if (role == "host") CaptureAndSendSavestate("partner");
-                        else SendFrame(4, Encoding.UTF8.GetBytes("partner"));
+                        activeTurn = "partner";
+                        SetStatus("Vez Ativa: PARCEIRO (Amigo controlando)");
                     }
                     if (f7 && !f7Prev)
                     {
-                        CaptureAndSendSavestate("host");
+                        activeTurn = "host";
+                        SetStatus("Vez Ativa: HOST");
                     }
                     f5Prev = f5; f6Prev = f6; f7Prev = f7;
 
-                    if (peerStream != null && activeTurn == role && IsPpssppFocused())
+                    // O Parceiro envia seus controles em tempo real sempre que a Janela Ao Vivo (ou PPSSPP) estiver focada!
+                    if (peerStream != null && role == "partner" && IsLocalGameWindowFocused())
                     {
+                        Dictionary<string, bool> btns = ReadLocalButtons();
                         StringBuilder sb = new StringBuilder("{\"event\":\"input.buttons.send\",\"buttons\":{");
                         bool first = true;
-                        foreach (var kv in VK_MAP)
+                        foreach (var kv in btns)
                         {
                             if (!first) sb.Append(",");
-                            bool pressed = (GetAsyncKeyState(kv.Value) & 0x8000) != 0;
-                            sb.Append("\"").Append(kv.Key).Append("\":").Append(pressed ? "true" : "false");
+                            sb.Append("\"").Append(kv.Key).Append("\":").Append(kv.Value ? "true" : "false");
                             first = false;
                         }
                         sb.Append("}}");
@@ -1110,7 +1478,7 @@ namespace TagForce3Coop
         }
 
         // ====================================================================
-        // AUTO-UPDATER PELO GITHUB (Jugo26/YuGiOh-GX-TagForce3-Coop)
+        // AUTO-UPDATER PELO GITHUB COM AUTO-RECOMPILACAO E AUTO-RESTART
         // ====================================================================
         private int CompareVersions(string v1, string v2)
         {
@@ -1119,11 +1487,35 @@ namespace TagForce3Coop
             int len = Math.Max(p1.Length, p2.Length);
             for (int i = 0; i < len; i++)
             {
-                int n1 = i < p1.Length ? int.Parse(p1[i]) : 0;
-                int n2 = i < p2.Length ? int.Parse(p2[i]) : 0;
+                int n1 = 0, n2 = 0;
+                if (i < p1.Length) int.TryParse(p1[i], out n1);
+                if (i < p2.Length) int.TryParse(p2[i], out n2);
                 if (n1 != n2) return n1.CompareTo(n2);
             }
             return 0;
+        }
+
+        private string DownloadGitHubText(WebClient wc, string fileName)
+        {
+            try
+            {
+                wc.Headers.Clear();
+                wc.Headers.Add("User-Agent", "YuGiOh-GX-TagForce3-Coop-Updater");
+                wc.Headers.Add("Accept", "application/vnd.github.v3.raw");
+                wc.Headers.Add("Cache-Control", "no-cache");
+                string apiUrl = string.Format("https://api.github.com/repos/{0}/contents/{1}?ref={2}&t={3}",
+                    GITHUB_REPO, fileName, GITHUB_BRANCH, DateTime.UtcNow.Ticks);
+                return wc.DownloadString(apiUrl);
+            }
+            catch
+            {
+                wc.Headers.Clear();
+                wc.Headers.Add("User-Agent", "YuGiOh-GX-TagForce3-Coop-Updater");
+                wc.Headers.Add("Cache-Control", "no-cache");
+                string rawUrl = string.Format("https://raw.githubusercontent.com/{0}/{1}/{2}?t={3}",
+                    GITHUB_REPO, GITHUB_BRANCH, fileName, DateTime.UtcNow.Ticks);
+                return wc.DownloadString(rawUrl);
+            }
         }
 
         private void CheckGitHubUpdates(bool force)
@@ -1134,12 +1526,7 @@ namespace TagForce3Coop
                 using (WebClient wc = new WebClient())
                 {
                     wc.Encoding = Encoding.UTF8;
-                    wc.Headers.Add("User-Agent", "YuGiOh-GX-TagForce3-Coop-Updater");
-                    wc.Headers.Add("Cache-Control", "no-cache");
-
-                    string url = string.Format("https://raw.githubusercontent.com/{0}/{1}/VERSION.json?t={2}",
-                        GITHUB_REPO, GITHUB_BRANCH, DateTime.UtcNow.Ticks);
-                    string json = wc.DownloadString(url);
+                    string json = DownloadGitHubText(wc, "VERSION.json");
 
                     Match mVer = Regex.Match(json, "\"version\"\\s*:\\s*\"([^\"]+)\"");
                     if (!mVer.Success) return;
@@ -1151,7 +1538,7 @@ namespace TagForce3Coop
                         return;
                     }
 
-                    AppendLog("[Auto-Update] Nova versao encontrada no GitHub: v" + remoteVer + "! Baixando...");
+                    AppendLog("[Auto-Update] Nova versao encontrada no GitHub: v" + remoteVer + "! Atualizando...");
                     string[] filesToUpdate = new string[]
                     {
                         "coop_engine.py",
@@ -1169,19 +1556,48 @@ namespace TagForce3Coop
                     {
                         try
                         {
-                            string fUrl = string.Format("https://raw.githubusercontent.com/{0}/{1}/{2}?t={3}",
-                                GITHUB_REPO, GITHUB_BRANCH, f, DateTime.UtcNow.Ticks);
+                            string content = DownloadGitHubText(wc, f);
                             string dest = Path.Combine(baseDir, f);
-                            wc.DownloadFile(fUrl, dest + ".tmp");
-                            if (File.Exists(dest)) File.Delete(dest);
-                            File.Move(dest + ".tmp", dest);
+                            File.WriteAllText(dest, content, Encoding.UTF8);
                             AppendLog("[Auto-Update] Atualizado: " + f);
                         }
                         catch { }
                     }
 
                     localVersion = remoteVer;
-                    AppendLog("[Auto-Update] Atualizado com sucesso para v" + remoteVer + "!");
+                    AppendLog("[Auto-Update] Recompilando executavel para v" + remoteVer + "...");
+
+                    string csc = @"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe";
+                    if (!File.Exists(csc)) csc = @"C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe";
+                    string csPath = Path.Combine(baseDir, "Launcher_Coop.cs");
+                    string newExePath = Path.Combine(baseDir, "Launcher_Coop_new.exe");
+                    string curExePath = Path.Combine(baseDir, "Launcher_Coop.exe");
+                    string oldExePath = Path.Combine(baseDir, "Launcher_Coop.exe.old");
+
+                    if (File.Exists(csc) && File.Exists(csPath))
+                    {
+                        ProcessStartInfo psi = new ProcessStartInfo
+                        {
+                            FileName = csc,
+                            Arguments = "/nologo /target:winexe /out:\"" + newExePath + "\" \"" + csPath + "\"",
+                            CreateNoWindow = true,
+                            UseShellExecute = false
+                        };
+                        Process p = Process.Start(psi);
+                        p.WaitForExit(8000);
+
+                        if (File.Exists(newExePath))
+                        {
+                            if (File.Exists(oldExePath)) File.Delete(oldExePath);
+                            if (File.Exists(curExePath)) File.Move(curExePath, oldExePath);
+                            File.Move(newExePath, curExePath);
+
+                            AppendLog("[Auto-Update] Reiniciando Launcher na nova versao v" + remoteVer + "...");
+                            Thread.Sleep(600);
+                            Process.Start(curExePath);
+                            Environment.Exit(0);
+                        }
+                    }
                 }
             }
             catch
@@ -1193,6 +1609,7 @@ namespace TagForce3Coop
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             running = false;
+            try { if (liveViewForm != null && !liveViewForm.IsDisposed) liveViewForm.Close(); } catch { }
             try { if (peerStream != null) peerStream.Close(); } catch { }
             try { if (peerClient != null) peerClient.Close(); } catch { }
             try { if (serverListener != null) serverListener.Stop(); } catch { }

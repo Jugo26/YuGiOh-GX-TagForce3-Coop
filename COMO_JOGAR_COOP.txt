@@ -1,70 +1,48 @@
 ========================================================================
-   YU-GI-OH! GX TAG FORCE 3 - CAMPANHA CO-OP DIRETA VIA RADMIN VPN
-         (SEM PRECISAR CONECTAR CONTROLE / SEM PARSEC)
+   YU-GI-OH! GX TAG FORCE 3 [PT-BR] - CAMPANHA CO-OP AO VIVO (v1.3.0)
 ========================================================================
 
-Agora o Launcher possui um MOTOR DE SINCRONIZACAO CO-OP VIA RADMIN VPN
-integrado (coop_engine.py + Launcher.pyw)!
-Voces dois abrem o jogo cada um no seu proprio PC pelo Launcher, sem
-precisar conectar controle no PC do outro!
+O QUE MUDOU NA v1.3.0 (TELA AO VIVO + ENTRADA AUTOMATICA NO DUELO):
+- Agora tudo o que aparece na tela do HOST vai em TEMPO REAL para o Amigo
+  na janela "Campanha Co-op Ao Vivo (Tela do Host em Tempo Real)"!
+- Quando o Host inicia um duelo, o Amigo ja entra automaticamente na mesma
+  tela do duelo junto com o Host!
+- Quando chegar a vez do Parceiro no Duelo em Dupla (Tag Duel 2x2), o Amigo
+  controla o Parceiro diretamente pelo teclado dele (Setas, Z, X, A, S, Q,
+  W, Espaco, V) ou pelo Controle USB dele na janela Ao Vivo!
 
 ------------------------------------------------------------------------
-1. COMO PREPARAR O JOGO PARA VOCE E SEU AMIGO
+COMO JOGAR (PASSO A PASSO):
 ------------------------------------------------------------------------
-1. Envie esta pasta do jogo para o seu amigo (para que ele tenha os
-   mesmos arquivos: Launcher.pyw, coop_engine.py, Abrir_Launcher.bat e
-   o arquivo .cso do jogo).
-2. Conectem-se na mesma sala do Radmin VPN (Seu IP: 26.196.166.86).
+1. CONECTAR NO RADMIN VPN:
+   - Host (26.196.166.86) e Amigo conectados na mesma rede do Radmin VPN.
 
-------------------------------------------------------------------------
-2. COMO CRIAR E ENTRAR NA CAMPANHA CO-OP
-------------------------------------------------------------------------
-PASSO A - O AMIGO MONTA O DECK DELE (NO PC DELE):
-  - Seu amigo pode entrar no jogo normalmente no PC dele, criar o
-    personagem dele, montar o Deck Principal dele e salvar o jogo.
-  - O Launcher detecta automaticamente o Deck salvo no Save dele!
-
-PASSO B - VOCE (HOST) CRIA A SALA:
-  1. Abra o "Abrir_Launcher.bat".
-  2. Clique no botao vermelho:
+2. NO PC DO HOST (VOCE):
+   - Abra o "Abrir_Launcher.bat" (ou "Launcher_Coop.exe").
+   - Clique no botao vermelho:
      "CRIAR SALA CO-OP E ABRIR JOGO (SOU O HOST)"
-  3. O Launcher vai abrir a sala no Radmin (porta 27315) e iniciar o
-     seu PPSSPP automaticamente.
+   - O seu PPSSPP vai abrir. Carregue seu save e ande pelo mapa!
 
-PASSO C - SEU AMIGO (PARCEIRO) CONECTA NA SUA CAMPANHA:
-  1. No PC dele, ele abre o "Abrir_Launcher.bat".
-  2. No campo "IP do Host no Radmin VPN", ele garante que esta o seu IP:
-     26.196.166.86
-  3. Ele clica no botao azul:
-     "ENTRAR NA CAMPANHA DO HOST (SOU O AMIGO / PARCEIRO)"
-  4. Automaticamente:
-     - O Deck proprio do seu amigo e enviado pelo Radmin VPN e injetado
-       no Parceiro da sua Campanha!
-     - O PPSSPP dele abre conectado na sua sessao!
+3. NO PC DO AMIGO (PARCEIRO):
+   - Abra o "Abrir_Launcher.bat" (ou "Launcher_Coop.exe").
+   - Clique no botao azul:
+     "ENTRAR NA CAMPANHA DO HOST AO VIVO (SOU O AMIGO / PARCEIRO)"
+   - Vai abrir a janela "Campanha Co-op Ao Vivo", mostrando em tempo real
+     tudo o que esta acontecendo na tela do Host!
+   - O Deck que o Amigo montou no save dele e enviado automaticamente para
+     o Parceiro da Campanha do Host!
 
-------------------------------------------------------------------------
-3. COMO FUNCIONA DURANTE A CAMPANHA E OS DUELOS (ATALHOS F5, F6, F7)
-------------------------------------------------------------------------
-- NO MAPA DA ILHA (Amigo preso ao Host):
-  Voce (Host) anda pela ilha da Academia de Duelos e escolhe o parceiro
-  que representa seu amigo. Ele anda atras de voce como companheiro e já
-  estara equipado com o Deck que seu amigo montou no PC dele!
-  Aperte [F5] a qualquer momento para sincronizar a tela do PPSSPP dele
-  com a sua.
+4. IMPORTANTE SOBRE OS DUELOS NA CAMPANHA (1x1 vs 2x2 TAG DUEL):
+   - No modo Campanha do Tag Force 3, existem duelistas sozinhos (Duelo 1x1)
+     e duplas de duelistas (Tag Duel 2x2).
+   - Para que o Parceiro entre em campo usando o Deck do seu Amigo, desafie
+     DUPLAS (Tag Duel 2x2) ou selecione Duelo em Dupla!
+   - Mesmo nos duelos 1x1 ou andando no mapa, seu Amigo ve sua tela ao vivo
+     e tambem pode controlar o jogo pela janela Ao Vivo se voces quiserem
+     revezar jogadas!
 
-- NOS DUELOS DA CAMPANHA (2v2 Tag Duel):
-  1. Quando comecar o duelo (Seu Turno / Host):
-     Aperte [F5] para sincronizar o inicio do duelo no PPSSPP do amigo.
-     Voce faz a sua jogada no seu PPSSPP (seus comandos aparecem ao vivo
-     no PPSSPP dele).
-  2. Quando chegar a Vez do Parceiro (Turno do Amigo):
-     Aperte [F6] (ou clique em "Passar Vez p/ Amigo" no Launcher).
-     O estado exato da partida vai para o PPSSPP do seu amigo e o turno
-     ativo passa para ele!
-     Seu amigo joga diretamente no PPSSPP dele (usando o proprio teclado
-     ou controle dele no PC dele!).
-  3. Quando seu amigo terminar o turno dele:
-     Seu amigo aperta [F7] (ou clica em "Fim do Turno do Amigo").
-     A jogada finalizada volta automaticamente para o seu PPSSPP e a
-     campanha continua em sincronia!
+5. COMO O AMIGO EDITA O PROPRIO DECK / PERSONAGEM:
+   - O Amigo clica no botao "Abrir Meu PPSSPP (Editar Meu Deck / Save)",
+     monta o deck dele com todas as cartas liberadas, salva na cama/menu,
+     fecha o PPSSPP local e clica em "Atualizar Meu Deck" na janela Ao Vivo!
 ========================================================================
