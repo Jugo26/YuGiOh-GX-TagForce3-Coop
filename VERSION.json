@@ -1,9 +1,9 @@
 {
-  "version": "1.4.0",
+  "version": "1.5.0",
   "released_at": "2026-11-02",
   "repo": "Jugo26/YuGiOh-GX-TagForce3-Coop",
   "branch": "main",
-  "changelog": "v1.4.0: Tela da Campanha Co-op Ao Vivo (DPI-Aware 1:1) + Entrada Automatica no Duelo + Controle Remoto Direto no Turno do Parceiro + Forcar Auto-Recompilacao do .exe ao clicar em Verificar Att (Git).",
+  "changelog": "v1.5.0: Carregamento 100% Automatico do Deck do Amigo no Parceiro da Campanha (Injecao Ao Vivo na RAM 0x08AAA350 + Hook MIPS 0x08836450 para qualquer Parceiro usar o Deck Customizado sem precisar de coracoes + Desativacao automatica de EncryptSave no PPSSPP do Amigo + Leitura Ao Vivo do Deck direto da RAM do PPSSPP local).",
   "files": [
     "VERSION.json",
     "Launcher_Coop.exe",

@@ -128,12 +128,22 @@ namespace TagForce3Coop
         private const string GITHUB_REPO = "Jugo26/YuGiOh-GX-TagForce3-Coop";
         private const string GITHUB_BRANCH = "main";
 
+        private const int DATA0_SLOT0_OFFSET = 0x48D4;
         private const int DATA0_PLAYER_DECK_OFFSET = 0x4A40;
         private const int DATA0_PARTNER_DECK_START = 0x4BAC;
-        private const int DATA0_DECK_SIZE = 0x16C; // 364 bytes
-        private const int DATA0_PARTNER_COUNT = 125;
+        private const int DATA0_DECK_SIZE = 0x16C; // 364 bytes (stride entre slots)
+        private const int DATA0_DECK_PAYLOAD_SIZE = 0x160; // 352 bytes (64 Nome + 192 Main/Counts + 96 Side/Extra)
+        private const int DATA0_PARTNER_COUNT = 125; // Slots 2..126 em 0x4BAC..0xFBFC
         private const int DATA0_PLAYER_NAME_OFFSET = 0xFD5C;
         private const uint PSP_PARTNER_AI_FLAG = 0x09E02998;
+        private const uint PSP_DECK_SLOT0_ADDR = 0x08AAA078;
+        private const uint PSP_DECK_SLOT1_PLAYER_ADDR = 0x08AAA1E4;
+        private const uint PSP_DECK_SLOT2_PARTNER_ADDR = 0x08AAA350;
+        private const uint PSP_DECK_SLOT3_PARTNER_ADDR = 0x08AAA4BC;
+        private const uint PSP_PLAYER_NAME_ADDR = 0x08AB5500;
+        private const uint PSP_DUEL_PARTNER_NAME_ADDR = 0x08AC1AB6;
+        private const uint PSP_DUEL_PARTNER_MAIN_ADDR = 0x08AC1AF8;
+        private const uint PSP_DUEL_PARTNER_EXTRA_ADDR = 0x08AC1BB8;
 
         // Win32 Menu Commands nativos do PPSSPP (Menu ID 101)
         private const uint WM_COMMAND = 0x0111;
@@ -271,9 +281,11 @@ namespace TagForce3Coop
         private readonly object sendLock = new object();
         private Socket wsSocket;
         private readonly object wsLock = new object();
-        private const string BINARY_VERSION = "1.4.0";
+        private const string BINARY_VERSION = "1.5.0";
         private string localVersion = BINARY_VERSION;
         private Dictionary<string, bool> hostLastPartnerBtns = new Dictionary<string, bool>();
+        private byte[] lastPartnerDeckBytes = null;
+        private string lastSentDeckHash = "";
 
         public LauncherForm()
         {
@@ -285,10 +297,28 @@ namespace TagForce3Coop
 
             CleanupOldExe();
             localVersion = BINARY_VERSION;
+            LoadCachedPartnerDeck();
             ConfigurePpssppForCoop(true, DEFAULT_RADMIN_IP);
             InitUI();
 
             ThreadPool.QueueUserWorkItem(_ => CheckGitHubUpdates(false));
+        }
+
+        private void LoadCachedPartnerDeck()
+        {
+            try
+            {
+                string cachePath = Path.Combine(baseDir, "PARTNER_DECK_CACHE.bin");
+                if (File.Exists(cachePath))
+                {
+                    byte[] raw = File.ReadAllBytes(cachePath);
+                    if (IsValidDeckBuffer(raw))
+                    {
+                        lastPartnerDeckBytes = raw;
+                    }
+                }
+            }
+            catch { }
         }
 
         private void CleanupOldExe()
@@ -640,6 +670,30 @@ namespace TagForce3Coop
             }
         }
 
+        private bool IsValidDeckBuffer(byte[] deckBytes)
+        {
+            if (deckBytes == null || deckBytes.Length < DATA0_DECK_PAYLOAD_SIZE) return false;
+            int mainCount = BitConverter.ToInt32(deckBytes, 64);
+            int sideCount = BitConverter.ToInt32(deckBytes, 68);
+            int extraCount = BitConverter.ToInt32(deckBytes, 72);
+            if (mainCount < 40 || mainCount > 80) return false;
+            if (sideCount < 0 || sideCount > 15) return false;
+            if (extraCount < 0 || extraCount > 30) return false;
+            ushort firstCard = BitConverter.ToUInt16(deckBytes, 76);
+            if (firstCard < 3000 || firstCard > 9500) return false;
+            return true;
+        }
+
+        private bool IsCleanPlayerName(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return false;
+            foreach (char ch in s)
+            {
+                if (ch < 0x20 || ch > 0x024F) return false;
+            }
+            return true;
+        }
+
         private void ConfigurePpssppForCoop(bool isHost, string hostIp)
         {
             try
@@ -655,7 +709,8 @@ namespace TagForce3Coop
                 Directory.CreateDirectory(saveDir);
 
                 string saveBase = Path.Combine(baseDir, "SAVEDATA_BASE", "ULES011830001");
-                if (!File.Exists(Path.Combine(saveDir, "DATA0")) && Directory.Exists(saveBase))
+                string data0Path = Path.Combine(saveDir, "DATA0");
+                if (!File.Exists(data0Path) && Directory.Exists(saveBase))
                 {
                     CopyDirRecursive(saveBase, saveDir);
                 }
@@ -672,7 +727,8 @@ namespace TagForce3Coop
                 if (File.Exists(ppssppIni))
                 {
                     string c = File.ReadAllText(ppssppIni, Encoding.UTF8);
-                    c = c.Replace("EnableCheats = False", "EnableCheats = True")
+                    c = c.Replace("EncryptSave = True", "EncryptSave = False")
+                         .Replace("EnableCheats = False", "EnableCheats = True")
                          .Replace("RemoteISOManualConfig = False", "RemoteISOManualConfig = True")
                          .Replace("RemoteDebuggerOnStartup = False", "RemoteDebuggerOnStartup = True")
                          .Replace("RemoteDebuggerLocal = False", "RemoteDebuggerLocal = True")
@@ -687,6 +743,7 @@ namespace TagForce3Coop
                         c = c.Replace("58:87:b8:25:4f:2d", mac);
                     }
 
+                    c = Regex.Replace(c, @"EncryptSave\s*=\s*\w+", "EncryptSave = False");
                     c = Regex.Replace(c, @"EnableAdhocServer\s*=\s*\w+", "EnableAdhocServer = " + (isHost ? "True" : "False"));
                     c = Regex.Replace(c, @"proAdhocServer\s*=\s*[^\r\n]+", "proAdhocServer = " + hostIp);
                     c = Regex.Replace(c, @"RemoteISOPort\s*=\s*\d+", "RemoteISOPort = " + WS_PORT);
@@ -700,11 +757,161 @@ namespace TagForce3Coop
                 {
                     File.Copy(localCheat, cheatFile, true);
                 }
+
+                // Verifica e repara DATA0 caso tenha sido criptografado ou corrompido anteriormente
+                if (File.Exists(data0Path))
+                {
+                    byte[] save = File.ReadAllBytes(data0Path);
+                    if (save.Length >= 0x10000)
+                    {
+                        byte[] slot1 = new byte[DATA0_DECK_SIZE];
+                        Buffer.BlockCopy(save, DATA0_PLAYER_DECK_OFFSET, slot1, 0, DATA0_DECK_SIZE);
+                        if (!IsValidDeckBuffer(slot1))
+                        {
+                            string baseData0 = Path.Combine(saveBase, "DATA0");
+                            if (File.Exists(baseData0))
+                            {
+                                try { File.Copy(data0Path, data0Path + ".encrypted_bak", true); } catch { }
+                                File.Copy(baseData0, data0Path, true);
+                                save = File.ReadAllBytes(data0Path);
+                                Buffer.BlockCopy(save, DATA0_PLAYER_DECK_OFFSET, slot1, 0, DATA0_DECK_SIZE);
+                            }
+                        }
+
+                        bool modified = false;
+                        string curPName = Encoding.Unicode.GetString(save, DATA0_PLAYER_NAME_OFFSET, 32).Split('\0')[0].Trim();
+                        if (!IsCleanPlayerName(curPName))
+                        {
+                            byte[] nameBytes = Encoding.Unicode.GetBytes("lbn");
+                            Array.Clear(save, DATA0_PLAYER_NAME_OFFSET, 50);
+                            Buffer.BlockCopy(nameBytes, 0, save, DATA0_PLAYER_NAME_OFFSET, nameBytes.Length);
+                            modified = true;
+                        }
+
+                        byte[] slot2 = new byte[DATA0_DECK_SIZE];
+                        Buffer.BlockCopy(save, DATA0_PARTNER_DECK_START, slot2, 0, DATA0_DECK_SIZE);
+                        byte[] fillDeck = IsValidDeckBuffer(lastPartnerDeckBytes) ? lastPartnerDeckBytes : (!IsValidDeckBuffer(slot2) ? slot1 : null);
+                        if (fillDeck != null && IsValidDeckBuffer(fillDeck))
+                        {
+                            Buffer.BlockCopy(fillDeck, 0, save, DATA0_SLOT0_OFFSET, DATA0_DECK_PAYLOAD_SIZE);
+                            for (int i = 0; i < DATA0_PARTNER_COUNT; i++)
+                            {
+                                int off = DATA0_PARTNER_DECK_START + (i * DATA0_DECK_SIZE);
+                                if (off + DATA0_DECK_PAYLOAD_SIZE <= DATA0_PLAYER_NAME_OFFSET)
+                                {
+                                    Buffer.BlockCopy(fillDeck, 0, save, off, DATA0_DECK_PAYLOAD_SIZE);
+                                }
+                            }
+                            modified = true;
+                        }
+
+                        if (modified)
+                        {
+                            File.WriteAllBytes(data0Path, save);
+                        }
+                    }
+                }
             }
             catch (Exception ex)
             {
                 AppendLog("[Aviso Config] " + ex.Message);
             }
+        }
+
+        private byte[] ReadRamBytesViaWebSocket(uint address, int size)
+        {
+            if (FindPpssppWindow() == IntPtr.Zero) return null;
+            try
+            {
+                using (Socket s = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp))
+                {
+                    s.ReceiveTimeout = 450;
+                    s.SendTimeout = 450;
+                    IAsyncResult ar = s.BeginConnect("127.0.0.1", WS_PORT, null, null);
+                    if (!ar.AsyncWaitHandle.WaitOne(300)) return null;
+                    s.EndConnect(ar);
+
+                    string req = "GET /debugger HTTP/1.1\r\n" +
+                                 "Host: 127.0.0.1:" + WS_PORT + "\r\n" +
+                                 "Upgrade: websocket\r\n" +
+                                 "Connection: Upgrade\r\n" +
+                                 "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
+                                 "Sec-WebSocket-Version: 13\r\n\r\n";
+                    s.Send(Encoding.ASCII.GetBytes(req));
+                    byte[] buf = new byte[4096];
+                    int r = s.Receive(buf);
+                    if (r <= 0 || !Encoding.ASCII.GetString(buf, 0, r).Contains("101")) return null;
+
+                    string json = "{\"event\":\"memory.read\",\"address\":" + address + ",\"size\":" + size + "}";
+                    byte[] raw = Encoding.UTF8.GetBytes(json);
+                    byte[] mask = new byte[] { 0x12, 0x34, 0x56, 0x78 };
+                    List<byte> frame = new List<byte> { 0x81, (byte)(0x80 | raw.Length) };
+                    frame.AddRange(mask);
+                    for (int i = 0; i < raw.Length; i++) frame.Add((byte)(raw[i] ^ mask[i & 3]));
+                    s.Send(frame.ToArray());
+
+                    StringBuilder sb = new StringBuilder();
+                    DateTime deadline = DateTime.UtcNow.AddMilliseconds(400);
+                    while (DateTime.UtcNow < deadline)
+                    {
+                        int n = s.Receive(buf);
+                        if (n <= 0) break;
+                        sb.Append(Encoding.ASCII.GetString(buf, 0, n));
+                        Match m = Regex.Match(sb.ToString(), "\"base64\"\\s*:\\s*\"([A-Za-z0-9+/=]+)\"");
+                        if (m.Success)
+                        {
+                            return Convert.FromBase64String(m.Groups[1].Value);
+                        }
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private void WriteRamBytesViaWebSocket(uint address, byte[] data, int offset, int count)
+        {
+            if (data == null || offset + count > data.Length) return;
+            byte[] slice = new byte[count];
+            Buffer.BlockCopy(data, offset, slice, 0, count);
+            string b64 = Convert.ToBase64String(slice);
+            SendWebSocketJson("{\"event\":\"memory.write\",\"address\":" + address + ",\"base64\":\"" + b64 + "\"}");
+        }
+
+        private void ApplyPartnerDeckToHostRam(byte[] deckBytes)
+        {
+            if (FindPpssppWindow() == IntPtr.Zero) return;
+            try
+            {
+                // 1. Garante Controle Manual do Parceiro (Co-op) e Hooks MIPS para sempre usar o Deck do Amigo (Slot 2) em qualquer Duelo de Dupla!
+                SendWebSocketJson("{\"event\":\"memory.write_u32\",\"address\":" + PSP_PARTNER_AI_FLAG + ",\"value\":0}");
+                SendWebSocketJson("{\"event\":\"memory.write_u32\",\"address\":142815208,\"value\":604110848}");  // 0x08832FE8: li $v0, 0
+                SendWebSocketJson("{\"event\":\"memory.write_u32\",\"address\":142828624,\"value\":1384120390}"); // 0x08836450: beql $s4, $zero, 0x0883656c
+                SendWebSocketJson("{\"event\":\"memory.write_u32\",\"address\":142828628,\"value\":604241922}");  // 0x08836454: li $a0, 2
+                SendWebSocketJson("{\"event\":\"memory.write_u32\",\"address\":142828916,\"value\":604241922}");  // 0x08836574: li $a0, 2
+                SendWebSocketJson("{\"event\":\"memory.write_u32\",\"address\":142828928,\"value\":604241922}");  // 0x08836580: li $a0, 2
+
+                // 2. Restaura o Nome do Host em RAM caso um Savestate antigo estivesse carregado
+                string hostName = (txtName != null && !string.IsNullOrEmpty(txtName.Text.Trim())) ? txtName.Text.Trim() : "lbn";
+                byte[] hostNameBuf = new byte[50];
+                byte[] hostNameRaw = Encoding.Unicode.GetBytes(hostName);
+                Buffer.BlockCopy(hostNameRaw, 0, hostNameBuf, 0, Math.Min(48, hostNameRaw.Length));
+                WriteRamBytesViaWebSocket(PSP_PLAYER_NAME_ADDR, hostNameBuf, 0, 50);
+
+                // 3. Injeta os 352 bytes do Deck do Amigo diretamente nos Slots de Parceiro na RAM do PPSSPP
+                if (IsValidDeckBuffer(deckBytes))
+                {
+                    WriteRamBytesViaWebSocket(PSP_DECK_SLOT0_ADDR, deckBytes, 0, DATA0_DECK_PAYLOAD_SIZE);
+                    WriteRamBytesViaWebSocket(PSP_DECK_SLOT2_PARTNER_ADDR, deckBytes, 0, DATA0_DECK_PAYLOAD_SIZE);
+                    WriteRamBytesViaWebSocket(PSP_DECK_SLOT3_PARTNER_ADDR, deckBytes, 0, DATA0_DECK_PAYLOAD_SIZE);
+
+                    // Tambem atualiza a tabela de Setup de Duelo em RAM para o Duelista 0 (Parceiro)
+                    WriteRamBytesViaWebSocket(PSP_DUEL_PARTNER_NAME_ADDR, deckBytes, 0, 64);
+                    WriteRamBytesViaWebSocket(PSP_DUEL_PARTNER_MAIN_ADDR, deckBytes, 64, 192);
+                    WriteRamBytesViaWebSocket(PSP_DUEL_PARTNER_EXTRA_ADDR, deckBytes, 256, 96);
+                }
+            }
+            catch { }
         }
 
         private byte[] ReadLocalPlayerDeck(out string playerName, out string deckName, out int cardCount)
@@ -715,17 +922,48 @@ namespace TagForce3Coop
             try
             {
                 string data0 = Path.Combine(ppssppDocsDir, "SAVEDATA", "ULES011830001", "DATA0");
-                if (!File.Exists(data0)) return null;
-                byte[] all = File.ReadAllBytes(data0);
-                if (all.Length < 0x10000) return null;
+                byte[] all = File.Exists(data0) ? File.ReadAllBytes(data0) : null;
+                byte[] deckBytes = null;
 
-                byte[] deckBytes = new byte[DATA0_DECK_SIZE];
-                Buffer.BlockCopy(all, DATA0_PLAYER_DECK_OFFSET, deckBytes, 0, DATA0_DECK_SIZE);
+                // 1. Tenta primeiro ler AO VIVO da RAM do PPSSPP local (0x08AAA1E4), onde o Deck esta sempre descriptografado e atualizado na hora!
+                byte[] ramDeck = ReadRamBytesViaWebSocket(PSP_DECK_SLOT1_PLAYER_ADDR, DATA0_DECK_SIZE);
+                if (IsValidDeckBuffer(ramDeck))
+                {
+                    deckBytes = ramDeck;
+                    if (all != null && all.Length >= 0x10000)
+                    {
+                        Buffer.BlockCopy(deckBytes, 0, all, DATA0_PLAYER_DECK_OFFSET, DATA0_DECK_PAYLOAD_SIZE);
+                        try { File.WriteAllBytes(data0, all); } catch { }
+                    }
+                }
+                else if (all != null && all.Length >= 0x10000)
+                {
+                    deckBytes = new byte[DATA0_DECK_SIZE];
+                    Buffer.BlockCopy(all, DATA0_PLAYER_DECK_OFFSET, deckBytes, 0, DATA0_DECK_SIZE);
+                    if (!IsValidDeckBuffer(deckBytes))
+                    {
+                        // Save no disco estava criptografado pelo PPSSPP antigo; restaura base limpa
+                        string baseData0 = Path.Combine(baseDir, "SAVEDATA_BASE", "ULES011830001", "DATA0");
+                        if (File.Exists(baseData0))
+                        {
+                            try { File.Copy(data0, data0 + ".encrypted_bak", true); } catch { }
+                            File.Copy(baseData0, data0, true);
+                            all = File.ReadAllBytes(data0);
+                            Buffer.BlockCopy(all, DATA0_PLAYER_DECK_OFFSET, deckBytes, 0, DATA0_DECK_SIZE);
+                        }
+                    }
+                }
+
+                if (!IsValidDeckBuffer(deckBytes)) return null;
 
                 deckName = Encoding.Unicode.GetString(deckBytes, 0, 64).Split('\0')[0].Trim();
-                playerName = Encoding.Unicode.GetString(all, DATA0_PLAYER_NAME_OFFSET, 32).Split('\0')[0].Trim();
+                if (all != null && all.Length >= 0x10000)
+                {
+                    string p = Encoding.Unicode.GetString(all, DATA0_PLAYER_NAME_OFFSET, 32).Split('\0')[0].Trim();
+                    if (IsCleanPlayerName(p)) playerName = p;
+                }
 
-                for (int i = 76; i + 1 < DATA0_DECK_SIZE; i += 2)
+                for (int i = 76; i + 1 < DATA0_DECK_PAYLOAD_SIZE; i += 2)
                 {
                     ushort cid = BitConverter.ToUInt16(deckBytes, i);
                     if (cid != 0) cardCount++;
@@ -742,22 +980,44 @@ namespace TagForce3Coop
         {
             try
             {
-                if (deckBytes == null || deckBytes.Length != DATA0_DECK_SIZE) return false;
-                string data0 = Path.Combine(ppssppDocsDir, "SAVEDATA", "ULES011830001", "DATA0");
-                if (!File.Exists(data0)) return false;
-
-                byte[] save = File.ReadAllBytes(data0);
-                for (int i = 0; i < DATA0_PARTNER_COUNT; i++)
+                if (!IsValidDeckBuffer(deckBytes))
                 {
-                    int off = DATA0_PARTNER_DECK_START + (i * DATA0_DECK_SIZE);
-                    if (off + DATA0_DECK_SIZE <= save.Length)
+                    AppendLog("[Aviso Deck] O pacote de deck recebido era invalido ou estava criptografado; ignorado para proteger o Save.");
+                    return false;
+                }
+
+                lastPartnerDeckBytes = new byte[DATA0_DECK_SIZE];
+                Buffer.BlockCopy(deckBytes, 0, lastPartnerDeckBytes, 0, Math.Min(deckBytes.Length, DATA0_DECK_SIZE));
+                try
+                {
+                    File.WriteAllBytes(Path.Combine(baseDir, "PARTNER_DECK_CACHE.bin"), lastPartnerDeckBytes);
+                }
+                catch { }
+
+                string data0 = Path.Combine(ppssppDocsDir, "SAVEDATA", "ULES011830001", "DATA0");
+                if (File.Exists(data0))
+                {
+                    byte[] save = File.ReadAllBytes(data0);
+                    if (save.Length >= 0x10000)
                     {
-                        Buffer.BlockCopy(deckBytes, 0, save, off, 64);
-                        Buffer.BlockCopy(deckBytes, 76, save, off + 76, DATA0_DECK_SIZE - 76);
+                        // Copia os 352 bytes (Nome + Contagens + Main + Side/Extra) para Slot 0 e Slots 2..126, sem tocar em 0xFD5C!
+                        Buffer.BlockCopy(deckBytes, 0, save, DATA0_SLOT0_OFFSET, DATA0_DECK_PAYLOAD_SIZE);
+                        for (int i = 0; i < DATA0_PARTNER_COUNT; i++)
+                        {
+                            int off = DATA0_PARTNER_DECK_START + (i * DATA0_DECK_SIZE);
+                            if (off + DATA0_DECK_PAYLOAD_SIZE <= DATA0_PLAYER_NAME_OFFSET)
+                            {
+                                Buffer.BlockCopy(deckBytes, 0, save, off, DATA0_DECK_PAYLOAD_SIZE);
+                            }
+                        }
+                        File.WriteAllBytes(data0, save);
                     }
                 }
-                File.WriteAllBytes(data0, save);
-                AppendLog(string.Format("[Deck do Amigo] Deck de {0} injetado em todos os parceiros da campanha!", friendName));
+
+                // Injeta AO VIVO na memoria RAM do PPSSPP do Host imediatamente!
+                ApplyPartnerDeckToHostRam(deckBytes);
+
+                AppendLog(string.Format("[Deck Automatico OK] Deck de {0} carregado no Parceiro (Save DATA0 + Memoria RAM Ao Vivo)!", friendName));
                 return true;
             }
             catch (Exception ex)
@@ -900,10 +1160,17 @@ namespace TagForce3Coop
                 gScaled.CompositingQuality = CompositingQuality.HighSpeed;
                 gScaled.SmoothingMode = SmoothingMode.None;
 
+                int frameTick = 0;
                 while (running && role == "host")
                 {
                     try
                     {
+                        frameTick++;
+                        if (frameTick % 45 == 1 && !sendingSavestate)
+                        {
+                            ApplyPartnerDeckToHostRam(lastPartnerDeckBytes);
+                        }
+
                         if (peerStream != null && !sendingSavestate)
                         {
                             IntPtr hwnd = FindPpssppWindow();
@@ -1185,6 +1452,29 @@ namespace TagForce3Coop
             }
         }
 
+        private string ComputeDeckHash(byte[] deckBytes)
+        {
+            if (deckBytes == null || deckBytes.Length < DATA0_DECK_PAYLOAD_SIZE) return "";
+            uint h = 2166136261u;
+            for (int i = 0; i < DATA0_DECK_PAYLOAD_SIZE; i++)
+            {
+                h ^= deckBytes[i];
+                h *= 16777619u;
+            }
+            return h.ToString("X8");
+        }
+
+        private void UpdateDeckInfoLabel(string dName, int cCount)
+        {
+            if (this.IsDisposed || lblDeckInfo == null) return;
+            if (this.InvokeRequired)
+            {
+                try { this.BeginInvoke(new Action<string, int>(UpdateDeckInfoLabel), dName, cCount); } catch { }
+                return;
+            }
+            lblDeckInfo.Text = string.Format("Deck no Save: {0} ({1} cartas)", dName, cCount);
+        }
+
         private void SendOrApplyMyDeck()
         {
             string pName, dName;
@@ -1195,6 +1485,9 @@ namespace TagForce3Coop
                 AppendLog("[Aviso] Save DATA0 ainda nao encontrado.");
                 return;
             }
+            UpdateDeckInfoLabel(dName, cCount);
+            lastSentDeckHash = ComputeDeckHash(deckBytes);
+
             string customName = txtName.Text.Trim();
             if (string.IsNullOrEmpty(customName)) customName = pName;
 
@@ -1202,14 +1495,14 @@ namespace TagForce3Coop
             {
                 byte[] nameBytes = Encoding.UTF8.GetBytes(customName + "|" + dName + "|" + cCount);
                 byte[] packet = new byte[DATA0_DECK_SIZE + nameBytes.Length];
-                Buffer.BlockCopy(deckBytes, 0, packet, 0, DATA0_DECK_SIZE);
+                Buffer.BlockCopy(deckBytes, 0, packet, 0, Math.Min(deckBytes.Length, DATA0_DECK_SIZE));
                 Buffer.BlockCopy(nameBytes, 0, packet, DATA0_DECK_SIZE, nameBytes.Length);
                 SendFrame(1, packet);
-                AppendLog(string.Format("[Deck Enviado] Seu deck '{0}' ({1} cartas) foi enviado para o Parceiro da Campanha!", dName, cCount));
+                AppendLog(string.Format("[Deck Enviado Automaticamente] Seu deck '{0}' ({1} cartas) foi carregado no Parceiro do Host!", dName, cCount));
             }
             else
             {
-                InjectPartnerDeckIntoHostSave(deckBytes, customName);
+                InjectPartnerDeckIntoHostSave(deckBytes, customName + " (" + dName + " - " + cCount + " cartas)");
             }
         }
 
@@ -1429,11 +1722,28 @@ namespace TagForce3Coop
         {
             bool f5Prev = false, f6Prev = false, f7Prev = false;
             string lastBtnJson = "";
+            int autoDeckTick = 0;
 
             while (running)
             {
                 try
                 {
+                    autoDeckTick++;
+                    if (autoDeckTick % 220 == 0 && peerStream != null && role == "partner")
+                    {
+                        string pName, dName;
+                        int cCount;
+                        byte[] curDeck = ReadLocalPlayerDeck(out pName, out dName, out cCount);
+                        if (curDeck != null)
+                        {
+                            string curHash = ComputeDeckHash(curDeck);
+                            if (!string.IsNullOrEmpty(curHash) && curHash != lastSentDeckHash)
+                            {
+                                SendOrApplyMyDeck();
+                            }
+                        }
+                    }
+
                     bool f5 = (GetAsyncKeyState(VK_F5) & 0x8000) != 0;
                     bool f6 = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
                     bool f7 = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
