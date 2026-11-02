@@ -1,0 +1,9 @@
+# Ignora arquivos pesados de imagem de disco e zips no Git (100MB limit do GitHub)
+*.cso
+*.iso
+*.zip
+*.ppst
+__pycache__/
+*.pyc
+*.tmp
+PPSSPP/

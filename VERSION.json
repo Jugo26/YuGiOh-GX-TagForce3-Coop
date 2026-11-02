@@ -1,0 +1,16 @@
+{
+  "version": "1.0.0",
+  "repo": "Jugo26/YuGiOh-GX-TagForce3-Coop",
+  "branch": "main",
+  "changelog": "Lancamento do Modo Campanha Co-op Direto via Radmin VPN + Deck Proprio do Parceiro + Auto-Updater GitHub",
+  "files": [
+    "VERSION.json",
+    "coop_engine.py",
+    "auto_updater.py",
+    "Launcher.pyw",
+    "Abrir_Launcher.bat",
+    "JOGAR.bat",
+    "ULES01183.ini",
+    "COMO_JOGAR_COOP.txt"
+  ]
+}
