@@ -1,16 +1,25 @@
 @echo off
-title Yu-Gi-Oh! GX Tag Force 3 PT-BR - Launcher Co-op v1.3.0
+title Yu-Gi-Oh! GX Tag Force 3 PT-BR - Launcher Co-op v1.4.0
 cd /d "%~dp0"
 
-REM 1. Fecha qualquer instancia antiga do Launcher antes de abrir/atualizar
+REM 1. Fecha qualquer instancia antiga do Launcher e move o .exe antigo para liberar a gravacao imediata
 taskkill /f /im Launcher_Coop.exe >nul 2>&1
+del /f /q "%~dp0Launcher_Coop.exe.old" >nul 2>&1
 
 REM 2. Compila automaticamente o Launcher_Coop.cs mais recente baixado do GitHub (.NET Framework nativo do Windows)
 if exist "%~dp0Launcher_Coop.cs" (
     if exist "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe" (
+        if exist "%~dp0Launcher_Coop.exe" move /y "%~dp0Launcher_Coop.exe" "%~dp0Launcher_Coop.exe.old" >nul 2>&1
         "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:winexe /out:"%~dp0Launcher_Coop.exe" "%~dp0Launcher_Coop.cs" >nul 2>&1
+        if not exist "%~dp0Launcher_Coop.exe" (
+            if exist "%~dp0Launcher_Coop.exe.old" move /y "%~dp0Launcher_Coop.exe.old" "%~dp0Launcher_Coop.exe" >nul 2>&1
+        )
     ) else if exist "C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe" (
+        if exist "%~dp0Launcher_Coop.exe" move /y "%~dp0Launcher_Coop.exe" "%~dp0Launcher_Coop.exe.old" >nul 2>&1
         "C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe" /nologo /target:winexe /out:"%~dp0Launcher_Coop.exe" "%~dp0Launcher_Coop.cs" >nul 2>&1
+        if not exist "%~dp0Launcher_Coop.exe" (
+            if exist "%~dp0Launcher_Coop.exe.old" move /y "%~dp0Launcher_Coop.exe.old" "%~dp0Launcher_Coop.exe" >nul 2>&1
+        )
     )
 )
 
