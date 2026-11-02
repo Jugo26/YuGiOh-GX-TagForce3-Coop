@@ -1,8 +1,8 @@
 {
-  "version": "1.1.0",
+  "version": "1.2.0",
   "repo": "Jugo26/YuGiOh-GX-TagForce3-Coop",
   "branch": "main",
-  "changelog": "Adicionado Executavel Nativo Launcher_Coop.exe (C# .NET) - Roda em qualquer PC Windows sem precisar de Python!",
+  "changelog": "v1.2.0: Corrigida sincronizacao automatica de Savestate (.ppst v1.02 via WM_COMMAND 40034/40035) e protocolo unificado!",
   "files": [
     "VERSION.json",
     "Launcher_Coop.exe",

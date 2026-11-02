@@ -2,37 +2,36 @@ import os
 import sys
 import time
 import json
-import zlib
+import gzip
 import base64
 import socket
 import struct
-import hashlib
+import shutil
+import random
+import re
 import threading
 import ctypes
 from ctypes import wintypes
 
 # ============================================================================
-# CONSTANTES DO JOGO (Yu-Gi-Oh! GX Tag Force 3 - ULES-01183)
+# CONSTANTES DO JOGO (Yu-Gi-Oh! GX Tag Force 3 - ULES-01183 v1.02)
 # ============================================================================
 GAME_ID = "ULES01183"
 COOP_PORT = 27315
 WS_PORT = 45450
 
-# Offsets dentro do arquivo SAVEDATA/ULES011830001/DATA0 (e estrutura na RAM)
 DATA0_PLAYER_DECK_OFFSET = 0x4A40
 DATA0_PARTNER_DECK_START = 0x4BAC
 DATA0_DECK_SIZE = 0x16C          # 364 bytes por deck
 DATA0_PARTNER_COUNT = 125        # 125 slots de parceiros (0x4BAC ate 0xFC1E)
 DATA0_PLAYER_NAME_OFFSET = 0xFD5C
-DATA0_TEAM_NAME_OFFSET = 0xFD8E
-DATA0_DP_OFFSET = 0xFDFC
-
-# Ponteiros na RAM do PSP (ULES-01183)
-PSP_STORY_PTR_ADDR = 0x08ECD964  # [0x08ECD964] + 0x7018 == Offset 0xFDFC do DATA0
-PSP_DATA0_BASE_DELTA = 0x8DE4    # Base da estrutura DATA0 na RAM = [0x08ECD964] - 0x8DE4
 PSP_PARTNER_AI_FLAG = 0x09E02998 # 0 = Controle Humano no Parceiro, 1 = IA
 
-# Teclas Virtual-Key do Windows (padrao controls.ini do PPSSPP)
+# Win32 Menu Commands nativos do PPSSPP (Menu ID 101)
+WM_COMMAND = 0x0111
+ID_FILE_QUICKSAVESTATE = 40034   # Save State direto no PPSSPP
+ID_FILE_QUICKLOADSTATE = 40035   # Load State direto no PPSSPP
+
 VK_MAP = {
     "up": 0x26,       # Seta Cima
     "down": 0x28,     # Seta Baixo
@@ -48,17 +47,11 @@ VK_MAP = {
     "select": 0x56,   # V (Select)
 }
 
-VK_F2 = 0x71  # Save State no PPSSPP
-VK_F4 = 0x73  # Load State no PPSSPP
 VK_F5 = 0x74  # Hotkey: Host sincroniza estado -> Amigo
 VK_F6 = 0x75  # Hotkey: Passar Turno para o Amigo (Parceiro)
 VK_F7 = 0x76  # Hotkey: Amigo finaliza Turno e devolve estado -> Host
 
-WM_KEYDOWN = 0x0100
-WM_KEYUP = 0x0101
-
 user32 = ctypes.windll.user32
-kernel32 = ctypes.windll.kernel32
 
 
 # ============================================================================
@@ -109,31 +102,40 @@ def read_xinput_buttons():
         "select": bool(w & 0x0020),
         "ltrigger": bool(w & 0x0100),
         "rtrigger": bool(w & 0x0200),
-        "cross": bool(w & 0x1000),    # A no Xbox
-        "circle": bool(w & 0x2000),   # B no Xbox
-        "square": bool(w & 0x4000),   # X no Xbox
-        "triangle": bool(w & 0x8000), # Y no Xbox
+        "cross": bool(w & 0x1000),
+        "circle": bool(w & 0x2000),
+        "square": bool(w & 0x4000),
+        "triangle": bool(w & 0x8000),
     }
 
 
 # ============================================================================
-# FUNCOES DE JANELA DO PPSSPP (Windows API)
+# FUNCOES DE JANELA DO PPSSPP (WM_COMMAND 40034 / 40035)
 # ============================================================================
 def find_ppsspp_hwnd():
-    """Encontra o HWND da janela principal do PPSSPP."""
-    result = []
+    """Encontra o HWND da janela principal do PPSSPP (classe PPSSPPWnd)."""
+    hwnd = user32.FindWindowW("PPSSPPWnd", None)
+    if hwnd:
+        return hwnd
 
+    result = []
     WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
-    def callback(hwnd, lparam):
-        if user32.IsWindowVisible(hwnd):
-            length = user32.GetWindowTextLengthW(hwnd)
+    def callback(h, lparam):
+        if user32.IsWindowVisible(h):
+            cls_buf = ctypes.create_unicode_buffer(128)
+            user32.GetClassNameW(h, cls_buf, 128)
+            if cls_buf.value == "PPSSPPWnd":
+                result.append(h)
+                return False
+            length = user32.GetWindowTextLengthW(h)
             if length > 0:
                 buf = ctypes.create_unicode_buffer(length + 1)
-                user32.GetWindowTextW(hwnd, buf, length + 1)
+                user32.GetWindowTextW(h, buf, length + 1)
                 title = buf.value
-                if "PPSSPP" in title and "Launcher" not in title:
-                    result.append(hwnd)
+                if ("PPSSPP" in title or "ULES01183" in title) and "Launcher" not in title:
+                    result.append(h)
+                    return False
         return True
 
     user32.EnumWindows(WNDENUMPROC(callback), 0)
@@ -144,33 +146,33 @@ def is_ppsspp_focused():
     hwnd = find_ppsspp_hwnd()
     if not hwnd:
         return False
-    fg = user32.GetForegroundWindow()
-    return fg == hwnd
+    return user32.GetForegroundWindow() == hwnd
 
 
-def send_key_to_ppsspp(vk_code):
-    """Envia uma tecla (ex: F2 Save State ou F4 Load State) direto para a janela do PPSSPP."""
+def trigger_ppsspp_savestate():
+    """Envia o comando nativo ID_FILE_QUICKSAVESTATE (40034) para o PPSSPP."""
     hwnd = find_ppsspp_hwnd()
     if not hwnd:
         return False
-    scan = user32.MapVirtualKeyW(vk_code, 0)
-    lparam_down = (scan << 16) | 1
-    lparam_up = (scan << 16) | 0xC0000001
-    user32.PostMessageW(hwnd, WM_KEYDOWN, vk_code, lparam_down)
-    time.sleep(0.03)
-    user32.PostMessageW(hwnd, WM_KEYUP, vk_code, lparam_up)
+    user32.PostMessageW(hwnd, WM_COMMAND, ID_FILE_QUICKSAVESTATE, 0)
+    return True
+
+
+def trigger_ppsspp_loadstate():
+    """Envia o comando nativo ID_FILE_QUICKLOADSTATE (40035) para o PPSSPP."""
+    hwnd = find_ppsspp_hwnd()
+    if not hwnd:
+        return False
+    user32.PostMessageW(hwnd, WM_COMMAND, ID_FILE_QUICKLOADSTATE, 0)
     return True
 
 
 def read_local_psp_buttons():
-    """Le os botoes pressionados no teclado/controle local apenas quando o PPSSPP esta em foco."""
     if not is_ppsspp_focused():
         return {k: False for k in VK_MAP}
-
     btns = {}
     for name, vk in VK_MAP.items():
         btns[name] = bool(user32.GetAsyncKeyState(vk) & 0x8000)
-
     xbtns = read_xinput_buttons()
     for name, val in xbtns.items():
         if val:
@@ -179,7 +181,7 @@ def read_local_psp_buttons():
 
 
 # ============================================================================
-# CLIENTE WEBSOCKET NATIVO (Puro Python stdlib para ws://127.0.0.1:45450/debugger)
+# CLIENTE WEBSOCKET NATIVO (ws://127.0.0.1:45450/debugger)
 # ============================================================================
 class PPSSPPWebSocket:
     def __init__(self, host="127.0.0.1", port=WS_PORT):
@@ -223,9 +225,9 @@ class PPSSPPWebSocket:
     def send_json(self, payload):
         if not self.connected and not self.connect():
             return False
-        raw = json.dumps(payload).encode("utf-8")
+        raw = json.dumps(payload).encode("utf-8") if isinstance(payload, dict) else payload.encode("utf-8")
         mask_key = os.urandom(4)
-        header = bytearray([0x81])  # FIN + Text frame
+        header = bytearray([0x81])
         length = len(raw)
         if length < 126:
             header.append(0x80 | length)
@@ -266,14 +268,6 @@ class PPSSPPWebSocket:
             "value": value
         })
 
-    def write_memory(self, address, data_bytes):
-        b64 = base64.b64encode(data_bytes).decode("ascii")
-        return self.send_json({
-            "event": "memory.write",
-            "address": address,
-            "base64": b64
-        })
-
 
 # ============================================================================
 # GERENCIADOR DE SAVE / DECKS E CONFIGURACAO AUTOMATICA DO PPSSPP
@@ -290,10 +284,6 @@ def get_ppsspp_dirs():
 
 
 def read_local_player_deck():
-    """
-    Le o Deck Principal (364 bytes em 0x4A40) e o Nome do Jogador (0xFD5C)
-    do arquivo SAVEDATA/ULES011830001/DATA0 local.
-    """
     dirs = get_ppsspp_dirs()
     data0_path = os.path.join(dirs["savedata"], "DATA0")
     if not os.path.exists(data0_path):
@@ -312,54 +302,44 @@ def read_local_player_deck():
             "player_name": player_name or "Parceiro",
             "deck_name": deck_name or "Deck Customizado",
             "card_count": card_count,
+            "deck_bytes": deck_bytes,
             "deck_b64": base64.b64encode(deck_bytes).decode("ascii"),
         }
     except Exception:
         return None
 
 
-def inject_partner_deck_into_host_save(deck_b64, friend_name="Amigo"):
-    """
-    Injeta o Deck de 364 bytes do Amigo em TODOS os slots de Parceiros (0x4BAC..0xFC1E)
-    no arquivo DATA0 do Host, para que qualquer parceiro na campanha use o deck do Amigo!
-    """
+def inject_partner_deck_into_host_save(deck_b64_or_bytes, friend_name="Amigo"):
     dirs = get_ppsspp_dirs()
     data0_path = os.path.join(dirs["savedata"], "DATA0")
     if not os.path.exists(data0_path):
         return False, "Save DATA0 nao encontrado no Host."
     try:
-        deck_bytes = bytearray(base64.b64decode(deck_b64))
+        if isinstance(deck_b64_or_bytes, (bytes, bytearray)):
+            deck_bytes = bytearray(deck_b64_or_bytes)
+        else:
+            deck_bytes = bytearray(base64.b64decode(deck_b64_or_bytes))
         if len(deck_bytes) != DATA0_DECK_SIZE:
             return False, "Tamanho de deck invalido."
 
         with open(data0_path, "rb") as f:
             save_data = bytearray(f.read())
 
-        # Preserva os 4 bytes de flags de personagem de cada slot (bytes 68..76) ou mantem estrutura
         for i in range(DATA0_PARTNER_COUNT):
             off = DATA0_PARTNER_DECK_START + (i * DATA0_DECK_SIZE)
             if off + DATA0_DECK_SIZE <= len(save_data):
-                # Copia as cartas (bytes 76..364) e o nome do deck (bytes 0..64) do amigo
                 save_data[off : off + 64] = deck_bytes[0:64]
                 save_data[off + 76 : off + DATA0_DECK_SIZE] = deck_bytes[76:DATA0_DECK_SIZE]
 
         with open(data0_path, "wb") as f:
             f.write(save_data)
 
-        return True, f"Deck de {friend_name} aplicado em todos os parceiros da campanha!"
+        return True, f"Deck de {friend_name} injetado em todos os parceiros da campanha!"
     except Exception as e:
         return False, str(e)
 
 
 def configure_ppsspp_for_coop(is_host=True, host_ip="26.196.166.86"):
-    """
-    Configura automaticamente ppsspp.ini, controls.ini, SAVEDATA e ULES01183.ini
-    para que o Modo Co-op via Radmin funcione sem configuracao manual em qualquer PC.
-    """
-    import shutil
-    import random
-    import re
-
     base_folder = os.path.dirname(os.path.abspath(__file__))
     dirs = get_ppsspp_dirs()
     os.makedirs(dirs["system"], exist_ok=True)
@@ -367,7 +347,6 @@ def configure_ppsspp_for_coop(is_host=True, host_ip="26.196.166.86"):
     os.makedirs(dirs["state"], exist_ok=True)
     os.makedirs(os.path.dirname(dirs["savedata"]), exist_ok=True)
 
-    # 0. Se o PC do amigo ainda nao tiver Save ou SYSTEM, instala da base inclusa na pasta
     savedata_base = os.path.join(base_folder, "SAVEDATA_BASE", "ULES011830001")
     if not os.path.exists(os.path.join(dirs["savedata"], "DATA0")) and os.path.exists(savedata_base):
         shutil.copytree(savedata_base, dirs["savedata"], dirs_exist_ok=True)
@@ -378,11 +357,9 @@ def configure_ppsspp_for_coop(is_host=True, host_ip="26.196.166.86"):
 
     if not os.path.exists(ppsspp_ini) and os.path.exists(os.path.join(system_base, "ppsspp.ini")):
         shutil.copy2(os.path.join(system_base, "ppsspp.ini"), ppsspp_ini)
-
     if not os.path.exists(controls_ini) and os.path.exists(os.path.join(system_base, "controls.ini")):
         shutil.copy2(os.path.join(system_base, "controls.ini"), controls_ini)
 
-    # 1. Configura ppsspp.ini
     if os.path.exists(ppsspp_ini):
         with open(ppsspp_ini, "r", encoding="utf-8", errors="ignore") as f:
             content = f.read()
@@ -399,66 +376,33 @@ def configure_ppsspp_for_coop(is_host=True, host_ip="26.196.166.86"):
         for old, new in replacements.items():
             content = content.replace(old, new)
 
-        # Se for o Amigo (Parceiro) e estiver com o mesmo MAC padrao do Host, gera MAC unico
         if not is_host and "58:87:b8:25:4f:2d" in content:
             new_mac = ":".join(f"{random.randint(0, 255):02x}" for _ in range(6))
             content = content.replace("58:87:b8:25:4f:2d", new_mac)
 
-        # Ajusta servidor AdHoc e IP do Radmin
         content = re.sub(r"EnableAdhocServer\s*=\s*\w+", f"EnableAdhocServer = {'True' if is_host else 'False'}", content)
         content = re.sub(r"proAdhocServer\s*=\s*[^\r\n]+", f"proAdhocServer = {host_ip}", content)
         content = re.sub(r"RemoteISOPort\s*=\s*\d+", f"RemoteISOPort = {WS_PORT}", content)
+        content = re.sub(r"StateSlot\s*=\s*\d+", "StateSlot = 0", content)
 
         with open(ppsspp_ini, "w", encoding="utf-8") as f:
             f.write(content)
 
-    # 2. Configura controls.ini (Adiciona Save State = F2 [1-132] e Load State = F4 [1-134])
-    controls_ini = os.path.join(dirs["system"], "controls.ini")
-    if os.path.exists(controls_ini):
-        with open(controls_ini, "r", encoding="utf-8", errors="ignore") as f:
-            c_text = f.read()
-        if "Save State" not in c_text:
-            c_text = c_text.rstrip() + "\r\nSave State = 1-132\r\n"
-        if "Load State" not in c_text:
-            c_text = c_text.rstrip() + "\r\nLoad State = 1-134\r\n"
-        with open(controls_ini, "w", encoding="utf-8") as f:
-            f.write(c_text)
-
-    # 3. Garante o cheat ULES01183.ini com Controle Manual do Parceiro
     cheat_path = os.path.join(dirs["cheats"], "ULES01183.ini")
-    cheat_content = (
-        "_S ULES-01183\n"
-        "_G Yu-Gi-Oh! GX Tag Force 3 (Europe) [PT-BR]\n\n"
-        "_C1 Modo Co-op (Controlar Parceiro no Duelo)\n"
-        "_L 0x21602998 0x00000000\n\n"
-        "_C1 Todas as cartas - 3 copias\n"
-        "_L 0x402B7000 0x0FFF0001\n"
-        "_L 0x00030304 0x00000000\n\n"
-        "_C1 Todas as receitas\n"
-        "_L 0x606CD964 0x0000011F\n"
-        "_L 0x000401CD 0x00005F06\n"
-        "_L 0x90000001 0x00000000\n\n"
-        "_C1 Desbloquear Decks de Parceiros\n"
-        "_L 0xC02A5684 0x00000001\n"
-        "_L 0x602A5680 0x00000015\n"
-        "_L 0x00000002 0x0000517D\n"
-        "_L 0x90000002 0x00000000\n"
-        "_L 0x602A5680 0x00000015\n"
-        "_L 0x0000000F 0x00005183\n"
-        "_L 0x90000002 0x00000000\n"
-    )
-    with open(cheat_path, "w", encoding="utf-8") as f:
-        f.write(cheat_content)
+    local_cheat = os.path.join(base_folder, "ULES01183.ini")
+    if os.path.exists(local_cheat):
+        shutil.copy2(local_cheat, cheat_path)
 
 
 # ============================================================================
-# PROTOCOLO TCP SOBRE RADMIN VPN (Mensagens com Prefixo de 4 bytes de Tamanho)
+# PROTOCOLO BINARIO UNIFICADO (100% Compativel entre C# Launcher_Coop.exe e Python)
+# Formato: [1 byte tipo][4 bytes tamanho big-endian][payload]
 # ============================================================================
-def send_packet(sock, msg_dict):
-    raw = json.dumps(msg_dict).encode("utf-8")
-    compressed = zlib.compress(raw, level=1)
-    header = struct.pack(">I", len(compressed))
-    sock.sendall(header + compressed)
+def send_frame(sock, frame_type, payload_bytes):
+    if not sock:
+        return
+    hdr = struct.pack(">BI", frame_type, len(payload_bytes))
+    sock.sendall(hdr + payload_bytes)
 
 
 def recv_exact(sock, n):
@@ -471,18 +415,17 @@ def recv_exact(sock, n):
     return bytes(buf)
 
 
-def recv_packet(sock):
-    hdr = recv_exact(sock, 4)
+def recv_frame(sock):
+    hdr = recv_exact(sock, 5)
     if not hdr:
-        return None
-    (size,) = struct.unpack(">I", hdr)
+        return None, None
+    ftype, size = struct.unpack(">BI", hdr)
     if size > 50 * 1024 * 1024:
-        return None
-    comp = recv_exact(sock, size)
-    if not comp:
-        return None
-    raw = zlib.decompress(comp)
-    return json.loads(raw.decode("utf-8"))
+        return None, None
+    payload = recv_exact(sock, size) if size > 0 else b""
+    if size > 0 and payload is None:
+        return None, None
+    return ftype, payload
 
 
 # ============================================================================
@@ -493,13 +436,13 @@ class RadminCoopSession:
         self.on_status_change = on_status_change or (lambda s: None)
         self.on_log = on_log or (lambda m: None)
         self.running = False
-        self.role = None  # "host" ou "partner"
-        self.active_turn = "host"  # "host" ou "partner"
+        self.role = None
+        self.active_turn = "host"
         self.peer_sock = None
         self.server_sock = None
+        self.send_lock = threading.Lock()
         self.ws = PPSSPPWebSocket()
-        self.partner_info = None
-        self.last_sent_buttons = {}
+        self.last_btn_json = ""
 
     def log(self, msg):
         self.on_log(msg)
@@ -507,71 +450,81 @@ class RadminCoopSession:
     def set_status(self, text):
         self.on_status_change(text)
 
-    def get_state_file_path(self):
-        dirs = get_ppsspp_dirs()
-        return os.path.join(dirs["state"], "ULES01183_1.00_0.ppst")
+    def find_newest_state_file(self, after_mtime):
+        state_dir = get_ppsspp_dirs()["state"]
+        if not os.path.exists(state_dir):
+            return None
+        best_file = None
+        best_time = after_mtime
+        for fname in os.listdir(state_dir):
+            if fname.startswith("ULES01183") and fname.endswith(".ppst") and not fname.endswith("undo.ppst"):
+                full = os.path.join(state_dir, fname)
+                mt = os.path.getmtime(full)
+                if mt > best_time:
+                    best_time = mt
+                    best_file = full
+        return best_file
 
-    def capture_and_send_savestate(self, new_turn=None):
-        """
-        Aciona F2 (Save State) no PPSSPP local, aguarda a gravacao do arquivo .ppst
-        e envia pela rede Radmin para o outro jogador carregar automaticamente (F4)!
-        """
+    def capture_and_send_savestate(self, new_turn="host"):
         if not self.peer_sock:
             self.log("[Aviso] Nenhum amigo conectado na sala ainda.")
             return False
 
-        state_path = self.get_state_file_path()
-        old_mtime = os.path.getmtime(state_path) if os.path.exists(state_path) else 0
-
-        if not send_key_to_ppsspp(VK_F2):
-            self.log("[Aviso] Janela do PPSSPP nao encontrada para salvar estado.")
+        before_time = time.time() - 0.1
+        if not trigger_ppsspp_savestate():
+            self.log("[Aviso] Janela do PPSSPP nao encontrada. Abra o jogo primeiro.")
             return False
 
-        # Aguarda ate 1.2s para o PPSSPP terminar de gravar o .ppst
-        deadline = time.time() + 1.2
+        found_state = None
+        deadline = time.time() + 2.5
         while time.time() < deadline:
-            if os.path.exists(state_path) and os.path.getmtime(state_path) > old_mtime:
-                time.sleep(0.08)
+            found_state = self.find_newest_state_file(before_time)
+            if found_state:
+                time.sleep(0.12)
                 break
-            time.sleep(0.03)
+            time.sleep(0.04)
 
-        if not os.path.exists(state_path):
-            self.log("[Erro] Arquivo de estado (.ppst) nao foi gerado pelo PPSSPP.")
+        if not found_state:
+            p102 = os.path.join(get_ppsspp_dirs()["state"], "ULES01183_1.02_0.ppst")
+            if os.path.exists(p102):
+                found_state = p102
+
+        if not found_state or not os.path.exists(found_state):
+            self.log("[Aviso] Certifique-se de que o jogo ja iniciou dentro do PPSSPP antes de sincronizar.")
             return False
 
         try:
-            with open(state_path, "rb") as f:
+            with open(found_state, "rb") as f:
                 raw_state = f.read()
-            if new_turn:
-                self.active_turn = new_turn
-            pkt = {
-                "type": "savestate",
-                "turn": self.active_turn,
-                "state_b64": base64.b64encode(raw_state).decode("ascii"),
-            }
-            send_packet(self.peer_sock, pkt)
-            turn_label = "SEU AMIGO (Parceiro)" if self.active_turn == "partner" else "HOST (Voce)"
-            self.log(f"[Sync] Partida sincronizada ({len(raw_state)//1024} KB)! Vez ativa: {turn_label}")
-            self.set_status(f"Conectado | Vez Ativa: {turn_label}")
+            self.active_turn = new_turn
+            turn_byte = b"\x01" if new_turn == "partner" else b"\x00"
+            payload = turn_byte + gzip.compress(raw_state, compresslevel=1)
+            with self.send_lock:
+                send_frame(self.peer_sock, 2, payload)
+            t_label = "SEU AMIGO (Parceiro)" if self.active_turn == "partner" else "HOST (Voce)"
+            self.log(f"[Sync OK] Campanha sincronizada ({len(raw_state)//1024} KB)! Vez ativa: {t_label}")
+            self.set_status(f"Sincronizado | Vez Ativa: {t_label}")
             return True
         except Exception as e:
-            self.log(f"[Erro Sync] Falha ao enviar estado: {e}")
+            self.log(f"[Erro Sync] {e}")
             return False
 
-    def apply_received_savestate(self, state_b64, turn):
-        """Salva o .ppst recebido do Radmin VPN e aciona F4 (Load State) no PPSSPP local."""
-        state_path = self.get_state_file_path()
+    def apply_received_savestate(self, payload):
         try:
-            raw_state = base64.b64decode(state_b64)
-            os.makedirs(os.path.dirname(state_path), exist_ok=True)
-            with open(state_path, "wb") as f:
-                f.write(raw_state)
-            self.active_turn = turn
-            time.sleep(0.04)
-            send_key_to_ppsspp(VK_F4)
-            turn_label = "PARCEIRO (Amigo)" if self.active_turn == "partner" else "HOST"
-            self.log(f"[Sync] Estado da Campanha carregado no seu PPSSPP! Vez ativa: {turn_label}")
-            self.set_status(f"Sincronizado | Vez Ativa: {turn_label}")
+            if not payload or len(payload) < 2:
+                return
+            self.active_turn = "partner" if payload[0] == 1 else "host"
+            raw_state = gzip.decompress(payload[1:])
+            state_dir = get_ppsspp_dirs()["state"]
+            os.makedirs(state_dir, exist_ok=True)
+            for fname in ("ULES01183_1.02_0.ppst", "ULES01183_1.00_0.ppst"):
+                with open(os.path.join(state_dir, fname), "wb") as f:
+                    f.write(raw_state)
+            time.sleep(0.05)
+            trigger_ppsspp_loadstate()
+            t_label = "PARCEIRO (Sua Vez!)" if self.active_turn == "partner" else "HOST"
+            self.log(f"[Sync OK] Campanha do Host carregada no seu PPSSPP! Vez ativa: {t_label}")
+            self.set_status(f"Sincronizado | Vez Ativa: {t_label}")
         except Exception as e:
             self.log(f"[Erro LoadState] {e}")
 
@@ -581,10 +534,10 @@ class RadminCoopSession:
         self.running = True
         self.role = "host"
         self.active_turn = "host"
-        threading.Thread(target=self._host_Loop, args=(bind_ip, port), daemon=True).start()
+        threading.Thread(target=self._host_loop, args=(bind_ip, port), daemon=True).start()
         threading.Thread(target=self._input_and_hotkey_loop, daemon=True).start()
 
-    def _host_Loop(self, bind_ip, port):
+    def _host_loop(self, bind_ip, port):
         try:
             srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -592,7 +545,7 @@ class RadminCoopSession:
             srv.listen(1)
             self.server_sock = srv
             self.set_status(f"Aguardando Amigo conectar na porta {port}...")
-            self.log(f"[Servidor Radmin] Sala Co-op aberta! Aguardando seu amigo conectar...")
+            self.log(f"[Servidor Radmin] Sala Co-op aberta na porta {port}! Aguardando seu amigo...")
 
             while self.running:
                 try:
@@ -606,11 +559,14 @@ class RadminCoopSession:
                 client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 self.peer_sock = client
                 self.log(f"[Conectado] Amigo conectou pelo Radmin VPN ({addr[0]})!")
-                self.set_status(f"Amigo Conectado ({addr[0]}) | Vez: HOST")
+                self.set_status(f"Amigo Conectado ({addr[0]}) | Sincronizando...")
+
+                # Sincroniza automaticamente a partida do Host para o Amigo 1.5s apos conectar!
+                threading.Thread(target=lambda: (time.sleep(1.5), self.capture_and_send_savestate("host")), daemon=True).start()
+
                 self._peer_receive_loop(client)
         except Exception as e:
             self.log(f"[Erro Servidor] {e}")
-            self.set_status(f"Erro no servidor: {e}")
 
     def start_partner(self, host_ip, port=COOP_PORT, custom_name=""):
         if self.running:
@@ -633,25 +589,11 @@ class RadminCoopSession:
                 self.peer_sock = s
                 self.log(f"[Conectado] Conectado a Campanha do Host ({host_ip}) via Radmin VPN!")
                 self.set_status(f"Conectado ao Host ({host_ip})!")
-
-                # Envia automaticamente o Deck proprio do Amigo (lido do DATA0 local)
-                deck_info = read_local_player_deck()
-                if deck_info:
-                    if custom_name:
-                        deck_info["player_name"] = custom_name
-                    send_packet(s, {
-                        "type": "partner_deck",
-                        "info": deck_info
-                    })
-                    self.log(
-                        f"[Deck Enviado] Seu deck '{deck_info['deck_name']}' "
-                        f"({deck_info['card_count']} cartas) foi sincronizado com o Parceiro da Campanha!"
-                    )
-
+                self.send_my_deck_now(custom_name)
                 self._peer_receive_loop(s)
-            except Exception as e:
+            except Exception:
                 if self.running:
-                    self.set_status(f"Aguardando Host ({host_ip})... Reconectando em 3s")
+                    self.set_status(f"Aguardando Host ({host_ip})... Tentando em 3s")
                     time.sleep(3.0)
 
     def send_my_deck_now(self, custom_name=""):
@@ -660,48 +602,44 @@ class RadminCoopSession:
             return
         deck_info = read_local_player_deck()
         if not deck_info:
-            self.log("[Erro] Nao foi possivel ler seu deck em SAVEDATA/ULES011830001/DATA0.")
             return
-        if custom_name:
-            deck_info["player_name"] = custom_name
+        fname = custom_name or deck_info["player_name"]
+        meta = f"{fname}|{deck_info['deck_name']}|{deck_info['card_count']}".encode("utf-8")
+        pkt = deck_info["deck_bytes"] + meta
         try:
-            send_packet(self.peer_sock, {
-                "type": "partner_deck",
-                "info": deck_info
-            })
-            self.log(f"[Deck Sincronizado] Deck '{deck_info['deck_name']}' ({deck_info['card_count']} cartas) enviado ao Host!")
+            with self.send_lock:
+                send_frame(self.peer_sock, 1, pkt)
+            self.log(f"[Deck Enviado] Seu deck '{deck_info['deck_name']}' ({deck_info['card_count']} cartas) foi sincronizado com o Parceiro da Campanha!")
         except Exception as e:
             self.log(f"[Erro] {e}")
 
     def _peer_receive_loop(self, sock):
         try:
             while self.running:
-                msg = recv_packet(sock)
-                if not msg:
+                ftype, payload = recv_frame(sock)
+                if ftype is None:
                     break
-                mtype = msg.get("type")
 
-                if mtype == "partner_deck" and self.role == "host":
-                    info = msg.get("info", {})
-                    self.partner_info = info
-                    ok, status_msg = inject_partner_deck_into_host_save(
-                        info.get("deck_b64", ""),
-                        info.get("player_name", "Amigo")
-                    )
-                    self.log(f"[Deck do Amigo] {status_msg} (Deck: {info.get('deck_name')} - {info.get('card_count')} cartas)")
-                    # Garante tambem flag de controle manual do parceiro na RAM via WebSocket
+                if ftype == 1 and len(payload) >= DATA0_DECK_SIZE:
+                    deck_bytes = payload[:DATA0_DECK_SIZE]
+                    meta = payload[DATA0_DECK_SIZE:].decode("utf-8", errors="ignore").split("|")
+                    fname = meta[0] if len(meta) > 0 else "Amigo"
+                    dname = meta[1] if len(meta) > 1 else "Deck"
+                    ccount = meta[2] if len(meta) > 2 else "?"
+                    ok, msg = inject_partner_deck_into_host_save(deck_bytes, f"{fname} ({dname} - {ccount} cartas)")
+                    self.log(f"[Deck do Amigo] {msg}")
                     self.ws.write_u32(PSP_PARTNER_AI_FLAG, 0)
 
-                elif mtype == "savestate":
-                    self.apply_received_savestate(msg["state_b64"], msg.get("turn", "host"))
+                elif ftype == 2:
+                    self.apply_received_savestate(payload)
 
-                elif mtype == "buttons":
-                    btns = msg.get("buttons", {})
-                    # Injeta os botoes recebidos via Radmin direto no PPSSPP local via WebSocket
-                    self.ws.send_buttons(btns)
+                elif ftype == 3:
+                    ws_json = payload.decode("utf-8", errors="ignore")
+                    self.ws.send_json(ws_json)
 
-                elif mtype == "request_sync" and self.role == "host":
-                    self.capture_and_send_savestate(new_turn=msg.get("turn", self.active_turn))
+                elif ftype == 4 and self.role == "host":
+                    req_turn = payload.decode("utf-8", errors="ignore") or "host"
+                    self.capture_and_send_savestate(req_turn)
 
         except Exception as e:
             self.log(f"[Desconectado] Conexao encerrada: {e}")
@@ -711,13 +649,6 @@ class RadminCoopSession:
                 self.set_status("Amigo desconectado. Aguardando reconexao...")
 
     def _input_and_hotkey_loop(self):
-        """
-        Monitora:
-        - F5: Sincronizar Estado do Host -> Amigo
-        - F6: Passar Vez/Controle para o Amigo (Sincroniza .ppst e ativa turno do Parceiro)
-        - F7: Amigo devolve Vez/Estado para o Host (Sincroniza .ppst do Amigo -> Host)
-        - Botoes do Jogo: Transmite os comandos do jogador da vez para o PPSSPP do outro jogador!
-        """
         f5_prev = False
         f6_prev = False
         f7_prev = False
@@ -730,37 +661,34 @@ class RadminCoopSession:
 
                 if f5_now and not f5_prev:
                     if self.role == "host":
-                        self.capture_and_send_savestate(new_turn="host")
+                        self.capture_and_send_savestate("host")
                     elif self.peer_sock:
-                        send_packet(self.peer_sock, {"type": "request_sync", "turn": "host"})
+                        with self.send_lock:
+                            send_frame(self.peer_sock, 4, b"host")
 
                 if f6_now and not f6_prev:
                     if self.role == "host":
-                        self.capture_and_send_savestate(new_turn="partner")
+                        self.capture_and_send_savestate("partner")
                     elif self.peer_sock:
-                        send_packet(self.peer_sock, {"type": "request_sync", "turn": "partner"})
+                        with self.send_lock:
+                            send_frame(self.peer_sock, 4, b"partner")
 
                 if f7_now and not f7_prev:
-                    if self.role == "partner":
-                        self.capture_and_send_savestate(new_turn="host")
-                    elif self.role == "host":
-                        self.capture_and_send_savestate(new_turn="host")
+                    self.capture_and_send_savestate("host")
 
                 f5_prev, f6_prev, f7_prev = f5_now, f6_now, f7_now
 
-                # Se este jogador esta no turno ativo e com o PPSSPP focado, transmite botoes em tempo real
-                if self.peer_sock and self.active_turn == self.role:
+                if self.peer_sock and self.active_turn == self.role and is_ppsspp_focused():
                     btns = read_local_psp_buttons()
-                    if btns != self.last_sent_buttons:
-                        self.last_sent_buttons = dict(btns)
-                        send_packet(self.peer_sock, {
-                            "type": "buttons",
-                            "buttons": btns
-                        })
+                    cur_json = json.dumps({"event": "input.buttons.send", "buttons": btns})
+                    if cur_json != self.last_btn_json:
+                        self.last_btn_json = cur_json
+                        with self.send_lock:
+                            send_frame(self.peer_sock, 3, cur_json.encode("utf-8"))
             except Exception:
                 pass
 
-            time.sleep(0.016)  # ~60 Hz
+            time.sleep(0.016)
 
     def stop(self):
         self.running = False

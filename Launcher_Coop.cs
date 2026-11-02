@@ -7,7 +7,6 @@ using System.IO.Compression;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -33,12 +32,20 @@ namespace TagForce3Coop
         private const int DATA0_PLAYER_NAME_OFFSET = 0xFD5C;
         private const uint PSP_PARTNER_AI_FLAG = 0x09E02998;
 
+        // Win32 Menu Commands nativos do PPSSPP (Menu ID 101)
+        private const uint WM_COMMAND = 0x0111;
+        private const int ID_FILE_QUICKSAVESTATE = 40034; // Save State direto no PPSSPP
+        private const int ID_FILE_QUICKLOADSTATE = 40035; // Load State direto no PPSSPP
+
         // Win32 API
         [DllImport("user32.dll")]
         private static extern IntPtr GetForegroundWindow();
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
 
         [DllImport("user32.dll")]
         private static extern bool IsWindowVisible(IntPtr hWnd);
@@ -54,13 +61,6 @@ namespace TagForce3Coop
         [DllImport("user32.dll")]
         private static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
-        [DllImport("user32.dll")]
-        private static extern uint MapVirtualKey(uint uCode, uint uMapType);
-
-        private const uint WM_KEYDOWN = 0x0100;
-        private const uint WM_KEYUP = 0x0101;
-        private const int VK_F2 = 0x71;
-        private const int VK_F4 = 0x73;
         private const int VK_F5 = 0x74;
         private const int VK_F6 = 0x75;
         private const int VK_F7 = 0x76;
@@ -108,7 +108,7 @@ namespace TagForce3Coop
         private readonly object sendLock = new object();
         private Socket wsSocket;
         private readonly object wsLock = new object();
-        private string localVersion = "1.1.0";
+        private string localVersion = "1.2.0";
 
         public LauncherForm()
         {
@@ -170,7 +170,7 @@ namespace TagForce3Coop
             };
             lblVersion = new Label
             {
-                Text = "Campanha Co-op via Radmin VPN (Executavel Nativo - Sem precisar de Python!) | v" + localVersion,
+                Text = "Campanha Co-op via Radmin VPN (Sincronizacao Direta WM_COMMAND) | v" + localVersion,
                 Font = new Font("Segoe UI", 9, FontStyle.Regular),
                 ForeColor = Color.FromArgb(56, 189, 248),
                 AutoSize = false,
@@ -301,10 +301,18 @@ namespace TagForce3Coop
             };
 
             Button btnF5 = CreateButton("[F5] Sincronizar Tela/Estado", new Point(16, 50), new Size(184, 32), Color.FromArgb(38, 43, 54), Color.White);
-            btnF5.Click += (s, e) => ThreadPool.QueueUserWorkItem(_ => CaptureAndSendSavestate("host"));
+            btnF5.Click += (s, e) => ThreadPool.QueueUserWorkItem(_ =>
+            {
+                if (role == "partner") SendFrame(4, Encoding.UTF8.GetBytes("host"));
+                else CaptureAndSendSavestate("host");
+            });
 
             Button btnF6 = CreateButton("[F6] Passar Vez p/ Amigo", new Point(208, 50), new Size(184, 32), Color.FromArgb(30, 58, 138), Color.FromArgb(56, 189, 248));
-            btnF6.Click += (s, e) => ThreadPool.QueueUserWorkItem(_ => CaptureAndSendSavestate("partner"));
+            btnF6.Click += (s, e) => ThreadPool.QueueUserWorkItem(_ =>
+            {
+                if (role == "partner") SendFrame(4, Encoding.UTF8.GetBytes("partner"));
+                else CaptureAndSendSavestate("partner");
+            });
 
             Button btnF7 = CreateButton("[F7] Fim do Turno do Amigo", new Point(400, 50), new Size(184, 32), Color.FromArgb(20, 83, 45), Color.FromArgb(74, 222, 128));
             btnF7.Click += (s, e) => ThreadPool.QueueUserWorkItem(_ => CaptureAndSendSavestate("host"));
@@ -355,8 +363,8 @@ namespace TagForce3Coop
             grpLog.Controls.Add(txtLog);
             this.Controls.Add(grpLog);
 
-            AppendLog("[Sistema] Launcher Nativo C# iniciado! Nao precisa de Python instalado.");
-            AppendLog("[Dica] No jogo: F5 sincroniza a tela | F6 passa a vez p/ Amigo | F7 devolve p/ Host.");
+            AppendLog("[Sistema] Launcher Co-op v" + localVersion + " iniciado!");
+            AppendLog("[Dica] Assim que o amigo conectar, sua tela sera sincronizada com o PPSSPP dele!");
         }
 
         private Button CreateButton(string text, Point loc, Size sz, Color bg, Color fg)
@@ -465,15 +473,8 @@ namespace TagForce3Coop
                     c = Regex.Replace(c, @"EnableAdhocServer\s*=\s*\w+", "EnableAdhocServer = " + (isHost ? "True" : "False"));
                     c = Regex.Replace(c, @"proAdhocServer\s*=\s*[^\r\n]+", "proAdhocServer = " + hostIp);
                     c = Regex.Replace(c, @"RemoteISOPort\s*=\s*\d+", "RemoteISOPort = " + WS_PORT);
+                    c = Regex.Replace(c, @"StateSlot\s*=\s*\d+", "StateSlot = 0");
                     File.WriteAllText(ppssppIni, c, Encoding.UTF8);
-                }
-
-                if (File.Exists(controlsIni))
-                {
-                    string ct = File.ReadAllText(controlsIni, Encoding.UTF8);
-                    if (!ct.Contains("Save State")) ct = ct.TrimEnd() + "\r\nSave State = 1-132\r\n";
-                    if (!ct.Contains("Load State")) ct = ct.TrimEnd() + "\r\nLoad State = 1-134\r\n";
-                    File.WriteAllText(controlsIni, ct, Encoding.UTF8);
                 }
 
                 string cheatFile = Path.Combine(cheatsDir, "ULES01183.ini");
@@ -550,7 +551,7 @@ namespace TagForce3Coop
         }
 
         // ====================================================================
-        // EXECUCAO E CONTROLE DA JANELA DO PPSSPP
+        // EXECUCAO E CONTROLE DA JANELA DO PPSSPP (WM_COMMAND 40034 / 40035)
         // ====================================================================
         private IntPtr FindPpssppWindow()
         {
@@ -559,10 +560,17 @@ namespace TagForce3Coop
             {
                 if (IsWindowVisible(hWnd))
                 {
-                    StringBuilder sb = new StringBuilder(256);
-                    GetWindowText(hWnd, sb, 256);
-                    string title = sb.ToString();
-                    if (title.Contains("PPSSPP") && !title.Contains("Launcher"))
+                    StringBuilder sbCls = new StringBuilder(128);
+                    GetClassName(hWnd, sbCls, 128);
+                    if (sbCls.ToString() == "PPSSPPWnd")
+                    {
+                        found = hWnd;
+                        return false;
+                    }
+                    StringBuilder sbTitle = new StringBuilder(256);
+                    GetWindowText(hWnd, sbTitle, 256);
+                    string title = sbTitle.ToString();
+                    if ((title.Contains("PPSSPP") || title.Contains("ULES01183")) && !title.Contains("Launcher"))
                     {
                         found = hWnd;
                         return false;
@@ -580,17 +588,48 @@ namespace TagForce3Coop
             return GetForegroundWindow() == hwnd;
         }
 
-        private bool SendKeyToPpsspp(int vk)
+        private bool TriggerPpssppSaveState()
         {
             IntPtr hwnd = FindPpssppWindow();
             if (hwnd == IntPtr.Zero) return false;
-            uint scan = MapVirtualKey((uint)vk, 0);
-            IntPtr lDown = (IntPtr)((scan << 16) | 1);
-            IntPtr lUp = (IntPtr)((scan << 16) | 0xC0000001);
-            PostMessage(hwnd, WM_KEYDOWN, (IntPtr)vk, lDown);
-            Thread.Sleep(35);
-            PostMessage(hwnd, WM_KEYUP, (IntPtr)vk, lUp);
+            // Envia o comando de menu nativo ID_FILE_QUICKSAVESTATE (40034) direto para o PPSSPPWnd
+            PostMessage(hwnd, WM_COMMAND, (IntPtr)ID_FILE_QUICKSAVESTATE, IntPtr.Zero);
             return true;
+        }
+
+        private bool TriggerPpssppLoadState()
+        {
+            IntPtr hwnd = FindPpssppWindow();
+            if (hwnd == IntPtr.Zero) return false;
+            // Envia o comando de menu nativo ID_FILE_QUICKLOADSTATE (40035) direto para o PPSSPPWnd
+            PostMessage(hwnd, WM_COMMAND, (IntPtr)ID_FILE_QUICKLOADSTATE, IntPtr.Zero);
+            return true;
+        }
+
+        private string GetPrimaryStatePath()
+        {
+            // DISC_ID = ULES01183, DISC_VERSION = 1.02 no PARAM.SFO do jogo PT-BR
+            return Path.Combine(ppssppDocsDir, "PPSSPP_STATE", "ULES01183_1.02_0.ppst");
+        }
+
+        private string FindNewestStateFile(DateTime afterUtc)
+        {
+            string stateDir = Path.Combine(ppssppDocsDir, "PPSSPP_STATE");
+            if (!Directory.Exists(stateDir)) return null;
+            string bestFile = null;
+            DateTime bestTime = afterUtc;
+
+            foreach (string f in Directory.GetFiles(stateDir, "ULES01183*.ppst"))
+            {
+                if (f.EndsWith("undo.ppst", StringComparison.OrdinalIgnoreCase)) continue;
+                DateTime wt = File.GetLastWriteTimeUtc(f);
+                if (wt > bestTime)
+                {
+                    bestTime = wt;
+                    bestFile = f;
+                }
+            }
+            return bestFile;
         }
 
         private void LaunchPpsspp()
@@ -729,11 +768,6 @@ namespace TagForce3Coop
             btnHost.Enabled = false;
         }
 
-        // Protocolo Binario Simples: [1 byte tipo][4 bytes tamanho big-endian][payload]
-        // Tipo 1: Deck do Parceiro (364 bytes + nome UTF8)
-        // Tipo 2: Savestate .ppst (1 byte turn + GZip bytes do .ppst)
-        // Tipo 3: Botoes JSON para o WebSocket do PPSSPP
-        // Tipo 4: Pedido de Sync
         private void SendFrame(byte type, byte[] payload)
         {
             NetworkStream ns = peerStream;
@@ -792,7 +826,15 @@ namespace TagForce3Coop
                     peerStream = client.GetStream();
                     string remoteIp = ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString();
                     AppendLog("[Conectado] Seu amigo conectou pelo Radmin VPN (" + remoteIp + ")!");
-                    SetStatus("Amigo Conectado (" + remoteIp + ") | Vez: HOST");
+                    SetStatus("Amigo Conectado (" + remoteIp + ") | Sincronizando...");
+
+                    // Sincroniza automaticamente a tela do Host com o Amigo 1.5s apos conectar!
+                    ThreadPool.QueueUserWorkItem(_ =>
+                    {
+                        Thread.Sleep(1500);
+                        CaptureAndSendSavestate("host");
+                    });
+
                     ReceiveLoop(peerStream);
                 }
             }
@@ -866,35 +908,42 @@ namespace TagForce3Coop
                 AppendLog("[Aviso] Nenhum amigo conectado na sala ainda.");
                 return;
             }
-            string statePath = Path.Combine(ppssppDocsDir, "PPSSPP_STATE", "ULES01183_1.00_0.ppst");
-            DateTime oldTime = File.Exists(statePath) ? File.GetLastWriteTimeUtc(statePath) : DateTime.MinValue;
 
-            if (!SendKeyToPpsspp(VK_F2))
+            DateTime beforeSave = DateTime.UtcNow.AddMilliseconds(-100);
+            if (!TriggerPpssppSaveState())
             {
-                AppendLog("[Aviso] Janela do PPSSPP nao encontrada.");
+                AppendLog("[Aviso] Janela do PPSSPP nao encontrada. Abra o jogo primeiro.");
                 return;
             }
 
-            DateTime deadline = DateTime.UtcNow.AddMilliseconds(1500);
+            string foundState = null;
+            DateTime deadline = DateTime.UtcNow.AddMilliseconds(2500);
             while (DateTime.UtcNow < deadline)
             {
-                if (File.Exists(statePath) && File.GetLastWriteTimeUtc(statePath) > oldTime)
+                foundState = FindNewestStateFile(beforeSave);
+                if (foundState != null)
                 {
-                    Thread.Sleep(90);
+                    Thread.Sleep(120); // Aguarda PPSSPP finalizar a gravacao no disco
                     break;
                 }
-                Thread.Sleep(30);
+                Thread.Sleep(40);
             }
 
-            if (!File.Exists(statePath))
+            if (foundState == null)
             {
-                AppendLog("[Erro] O arquivo de estado (.ppst) nao foi gerado pelo PPSSPP.");
+                string primary = GetPrimaryStatePath();
+                if (File.Exists(primary)) foundState = primary;
+            }
+
+            if (foundState == null || !File.Exists(foundState))
+            {
+                AppendLog("[Aviso] Certifique-se de que o jogo ja iniciou dentro do PPSSPP antes de sincronizar.");
                 return;
             }
 
             try
             {
-                byte[] rawState = File.ReadAllBytes(statePath);
+                byte[] rawState = File.ReadAllBytes(foundState);
                 activeTurn = newTurn;
                 using (MemoryStream ms = new MemoryStream())
                 {
@@ -907,7 +956,7 @@ namespace TagForce3Coop
                     SendFrame(2, payload);
                 }
                 string tLabel = activeTurn == "partner" ? "SEU AMIGO (Parceiro)" : "HOST";
-                AppendLog(string.Format("[Sync] Partida sincronizada ({0} KB)! Vez ativa: {1}", rawState.Length / 1024, tLabel));
+                AppendLog(string.Format("[Sync OK] Campanha sincronizada ({0} KB)! Vez ativa: {1}", rawState.Length / 1024, tLabel));
                 SetStatus("Sincronizado | Vez Ativa: " + tLabel);
             }
             catch (Exception ex)
@@ -922,20 +971,29 @@ namespace TagForce3Coop
             {
                 if (payload == null || payload.Length < 2) return;
                 activeTurn = payload[0] == 1 ? "partner" : "host";
-                string statePath = Path.Combine(ppssppDocsDir, "PPSSPP_STATE", "ULES01183_1.00_0.ppst");
-                Directory.CreateDirectory(Path.GetDirectoryName(statePath));
+                string stateDir = Path.Combine(ppssppDocsDir, "PPSSPP_STATE");
+                Directory.CreateDirectory(stateDir);
 
+                string path102 = Path.Combine(stateDir, "ULES01183_1.02_0.ppst");
+                string path100 = Path.Combine(stateDir, "ULES01183_1.00_0.ppst");
+
+                byte[] decompressed;
                 using (MemoryStream msIn = new MemoryStream(payload, 1, payload.Length - 1))
                 using (GZipStream gz = new GZipStream(msIn, CompressionMode.Decompress))
-                using (FileStream fsOut = new FileStream(statePath, FileMode.Create, FileAccess.Write))
+                using (MemoryStream msOut = new MemoryStream())
                 {
-                    gz.CopyTo(fsOut);
+                    gz.CopyTo(msOut);
+                    decompressed = msOut.ToArray();
                 }
 
-                Thread.Sleep(40);
-                SendKeyToPpsspp(VK_F4);
-                string tLabel = activeTurn == "partner" ? "PARCEIRO (Amigo)" : "HOST";
-                AppendLog("[Sync] Estado da Campanha carregado no seu PPSSPP! Vez ativa: " + tLabel);
+                File.WriteAllBytes(path102, decompressed);
+                File.WriteAllBytes(path100, decompressed);
+
+                Thread.Sleep(50);
+                TriggerPpssppLoadState();
+
+                string tLabel = activeTurn == "partner" ? "PARCEIRO (Sua Vez!)" : "HOST";
+                AppendLog("[Sync OK] Campanha do Host carregada no seu PPSSPP! Vez ativa: " + tLabel);
                 SetStatus("Sincronizado | Vez Ativa: " + tLabel);
             }
             catch (Exception ex)
