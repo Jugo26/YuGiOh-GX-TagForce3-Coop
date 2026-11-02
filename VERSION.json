@@ -1,10 +1,12 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "repo": "Jugo26/YuGiOh-GX-TagForce3-Coop",
   "branch": "main",
-  "changelog": "Lancamento do Modo Campanha Co-op Direto via Radmin VPN + Deck Proprio do Parceiro + Auto-Updater GitHub",
+  "changelog": "Adicionado Executavel Nativo Launcher_Coop.exe (C# .NET) - Roda em qualquer PC Windows sem precisar de Python!",
   "files": [
     "VERSION.json",
+    "Launcher_Coop.exe",
+    "Launcher_Coop.cs",
     "coop_engine.py",
     "auto_updater.py",
     "Launcher.pyw",
