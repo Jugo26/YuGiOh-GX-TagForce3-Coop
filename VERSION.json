@@ -1,9 +1,9 @@
 {
-  "version": "1.3.0",
+  "version": "1.4.0",
   "released_at": "2026-11-02",
   "repo": "Jugo26/YuGiOh-GX-TagForce3-Coop",
   "branch": "main",
-  "changelog": "v1.3.0: Adicionada Tela da Campanha Co-op Ao Vivo (Espelhamento em Tempo Real da tela do Host para o Amigo a 18 FPS + Controle Remoto Direto no Duelo + Auto-Recompilacao do Launcher_Coop.exe).",
+  "changelog": "v1.4.0: Tela da Campanha Co-op Ao Vivo (DPI-Aware 1:1) + Entrada Automatica no Duelo + Controle Remoto Direto no Turno do Parceiro + Forcar Auto-Recompilacao do .exe ao clicar em Verificar Att (Git).",
   "files": [
     "VERSION.json",
     "Launcher_Coop.exe",

@@ -154,6 +154,9 @@ namespace TagForce3Coop
         }
 
         [DllImport("user32.dll")]
+        private static extern bool SetProcessDPIAware();
+
+        [DllImport("user32.dll")]
         private static extern IntPtr GetForegroundWindow();
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
@@ -268,7 +271,8 @@ namespace TagForce3Coop
         private readonly object sendLock = new object();
         private Socket wsSocket;
         private readonly object wsLock = new object();
-        private string localVersion = "1.3.0";
+        private const string BINARY_VERSION = "1.4.0";
+        private string localVersion = BINARY_VERSION;
         private Dictionary<string, bool> hostLastPartnerBtns = new Dictionary<string, bool>();
 
         public LauncherForm()
@@ -280,7 +284,7 @@ namespace TagForce3Coop
             ppssppDocsDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "PPSSPP", "PSP");
 
             CleanupOldExe();
-            ReadLocalVersion();
+            localVersion = BINARY_VERSION;
             ConfigurePpssppForCoop(true, DEFAULT_RADMIN_IP);
             InitUI();
 
@@ -391,7 +395,7 @@ namespace TagForce3Coop
             };
 
             Button btnCheckGit = CreateButton("Verificar Att (Git)", new Point(440, 24), new Size(145, 26), Color.FromArgb(30, 41, 59), Color.FromArgb(74, 222, 128));
-            btnCheckGit.Click += (s, e) => ThreadPool.QueueUserWorkItem(_ => CheckGitHubUpdates(false));
+            btnCheckGit.Click += (s, e) => ThreadPool.QueueUserWorkItem(_ => CheckGitHubUpdates(true));
 
             Label lblName = new Label
             {
@@ -1619,6 +1623,7 @@ namespace TagForce3Coop
         [STAThread]
         public static void Main()
         {
+            try { SetProcessDPIAware(); } catch { }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Application.Run(new LauncherForm());
